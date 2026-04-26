@@ -41,6 +41,12 @@ import Foundation
             smartLayoutAtStartup()
             _ = try await config.afterStartupCommand.runCmdSeq(.defaultEnv, .emptyStdin)
         }
+        // Personal-fork: optional homepage auto-launch. Runs after upstream
+        // afterStartupCommand so user-defined commands take precedence.
+        let uiState = UISettingsStore.shared.state
+        if uiState.homepage.launchOnStartup, !uiState.appRouting.isEmpty {
+            await launchHomepage(uiState)
+        }
     }
 }
 

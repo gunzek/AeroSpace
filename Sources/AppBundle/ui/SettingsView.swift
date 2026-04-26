@@ -40,7 +40,7 @@ struct SettingsView: View {
             Group {
                 switch selection {
                     case .appRouting:  AppRoutingSection(store: store)
-                    case .homepage:    HomepagePlaceholder(store: store)
+                    case .homepage:    HomepageSection(store: store)
                     case .keybindings: ComingSoonView(title: "Keybindings", phase: "Phase 2")
                     case .gaps:        ComingSoonView(title: "Gaps", phase: "Phase 2")
                     case .catchAll:    ComingSoonView(title: "Catch-all workspaces", phase: "Phase 3")
@@ -305,13 +305,29 @@ enum SettingsConfigPath {
     }
 }
 
-private struct HomepagePlaceholder: View {
+private struct HomepageSection: View {
     @ObservedObject var store: UISettingsStore
+    @State private var launching = false
 
     var body: some View {
         SettingsScaffold(title: "Homepage") {
-            Text("Launch all routed apps with a single click. Wired up after App Routing is in place.")
+            Text("One click launches every app in the App Routing list. Each lands on its pinned workspace via the rules saved to ~/.aerospace.toml.")
                 .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Button {
+                    launchNow()
+                } label: {
+                    Label(launching ? "Launching\u{2026}" : "Launch Homepage Now", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.state.appRouting.isEmpty || launching)
+
+                Text("\(store.state.appRouting.count) app\(store.state.appRouting.count == 1 ? "" : "s") will open")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+
             Toggle("Launch on AeroSpace startup", isOn: Binding(
                 get: { store.state.homepage.launchOnStartup },
                 set: { newValue in
@@ -319,13 +335,22 @@ private struct HomepagePlaceholder: View {
                 },
             ))
             .toggleStyle(.switch)
-            .disabled(store.state.appRouting.isEmpty)
+
             if store.state.appRouting.isEmpty {
-                Text("Add at least one App Routing rule first.")
+                Text("Add at least one App Routing rule before this does anything.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
             Spacer()
+        }
+    }
+
+    private func launchNow() {
+        launching = true
+        let snapshot = store.state
+        Task { @MainActor in
+            await launchHomepage(snapshot)
+            launching = false
         }
     }
 }
