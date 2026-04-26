@@ -43,6 +43,7 @@ public func menuBar(viewModel: TrayMenuModel) -> some Scene { // todo should it 
             }
         }.keyboardShortcut("E", modifiers: .command)
         getExperimentalUISettingsMenu(viewModel: viewModel)
+        OpenSettingsButton()
         openConfigButton()
         reloadConfigButton()
         Button("Quit \(aeroSpaceAppName)") {
@@ -76,10 +77,23 @@ func openConfigButton(showShortcutGroup: Bool = false) -> some View {
             case .ambiguousConfigError:
                 fallbackConfig.open(with: editor)
         }
-    }.keyboardShortcut(",", modifiers: .command)
+    }.keyboardShortcut("O", modifiers: .command)
     switch showShortcutGroup {
-        case true: shortcutGroup(label: Text("⌘ ,"), content: button)
+        case true: shortcutGroup(label: Text("⌘ O"), content: button)
         case false: button
+    }
+}
+
+// macOS-conventional ⌘, opens Settings. Uses @Environment(\.openWindow) so it
+// must live in a SwiftUI View struct rather than a free @ViewBuilder function.
+@MainActor
+struct OpenSettingsButton: View {
+    @Environment(\.openWindow) private var openWindow: OpenWindowAction
+
+    var body: some View {
+        Button("Open Settings…") {
+            openWindow(id: settingsWindowId)
+        }.keyboardShortcut(",", modifiers: .command)
     }
 }
 

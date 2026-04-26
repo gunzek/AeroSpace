@@ -21,5 +21,6 @@ struct AeroSpaceApp: App {
                     openWindow(id: messageWindowId)
                 }
             }
+        getSettingsWindow()
     }
 }
