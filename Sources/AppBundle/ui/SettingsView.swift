@@ -1,5 +1,7 @@
+import AppKit
 import Common
 import SwiftUI
+import UniformTypeIdentifiers
 
 public let settingsWindowId = "\(aeroSpaceAppName).settings"
 
@@ -37,7 +39,7 @@ struct SettingsView: View {
         } detail: {
             Group {
                 switch selection {
-                    case .appRouting:  AppRoutingPlaceholder(store: store)
+                    case .appRouting:  AppRoutingSection(store: store)
                     case .homepage:    HomepagePlaceholder(store: store)
                     case .keybindings: ComingSoonView(title: "Keybindings", phase: "Phase 2")
                     case .gaps:        ComingSoonView(title: "Gaps", phase: "Phase 2")
@@ -84,16 +86,221 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     }
 }
 
-private struct AppRoutingPlaceholder: View {
+private struct AppRoutingSection: View {
     @ObservedObject var store: UISettingsStore
+    @State private var draft: [AppRoutingRule] = []
+    @State private var saveStatus: SaveStatus = .clean
+
+    enum SaveStatus: Equatable {
+        case clean
+        case dirty
+        case saving
+        case error(String)
+        case saved
+
+        var isDirty: Bool { self != .clean && self != .saved }
+    }
 
     var body: some View {
         SettingsScaffold(title: "App Routing") {
-            Text("Pin apps to specific workspaces. Editable UI ships in Phase 1.4.")
+            Text("Pin apps to specific workspaces. Save writes the rules into ~/.aerospace.toml and reloads AeroSpace.")
                 .foregroundStyle(.secondary)
-            Text("Currently saved: \(store.state.appRouting.count) rule\(store.state.appRouting.count == 1 ? "" : "s")")
-                .font(.system(.body, design: .monospaced))
-            Spacer()
+
+            HStack {
+                Button {
+                    addAppFromPicker()
+                } label: {
+                    Label("Add app…", systemImage: "plus")
+                }
+                Spacer()
+                Text("\(draft.count) rule\(draft.count == 1 ? "" : "s")")
+                    .foregroundStyle(.tertiary)
+                    .font(.caption)
+            }
+
+            ScrollView {
+                VStack(spacing: 4) {
+                    ForEach($draft) { $rule in
+                        AppRoutingRow(rule: $rule, onDelete: { remove(rule) })
+                            .onChange(of: rule) { _ in markDirty() }
+                    }
+                    if draft.isEmpty {
+                        Text("No rules yet. Click \u{201C}Add app\u{2026}\u{201D} to pick an app from /Applications.")
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 24)
+                    }
+                }
+            }
+            .frame(minHeight: 160)
+            .background(Color(.controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            HStack {
+                statusLabel
+                Spacer()
+                Button("Discard") { resetDraft() }
+                    .disabled(!saveStatus.isDirty)
+                Button("Save") { save() }
+                    .keyboardShortcut("s", modifiers: .command)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!saveStatus.isDirty || hasInvalidRules)
+            }
+        }
+        .onAppear { resetDraft() }
+        .onChange(of: store.state.appRouting) { newValue in
+            // External update wins only if the user hasn't started editing.
+            if !saveStatus.isDirty { draft = newValue }
+        }
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        switch saveStatus {
+            case .clean:                EmptyView()
+            case .dirty:                Text("Unsaved changes").foregroundStyle(.orange).font(.caption)
+            case .saving:               Text("Saving\u{2026}").foregroundStyle(.secondary).font(.caption)
+            case .error(let message):   Text(message).foregroundStyle(.red).font(.caption).lineLimit(2)
+            case .saved:                Label("Saved", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.caption)
+        }
+    }
+
+    private var hasInvalidRules: Bool {
+        draft.contains { rule in
+            rule.workspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || rule.workspace.contains("'")
+                || rule.appId.contains("'")
+        }
+    }
+
+    private func resetDraft() {
+        draft = store.state.appRouting
+        saveStatus = .clean
+    }
+
+    private func markDirty() {
+        if saveStatus != .dirty { saveStatus = .dirty }
+    }
+
+    private func remove(_ rule: AppRoutingRule) {
+        draft.removeAll { $0.id == rule.id }
+        markDirty()
+    }
+
+    private func addAppFromPicker() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose an app"
+        panel.message = "Pick a .app to pin to a workspace"
+        panel.allowedContentTypes = [UTType.application]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let bundle = Bundle(url: url)
+        let id = bundle?.bundleIdentifier
+            ?? url.deletingPathExtension().lastPathComponent
+        let displayName = (bundle?.infoDictionary?["CFBundleName"] as? String)
+            ?? url.deletingPathExtension().lastPathComponent
+        if draft.contains(where: { $0.appId == id }) {
+            saveStatus = .error("\(displayName) is already in the list.")
+            return
+        }
+        let rule = AppRoutingRule(
+            appId: id,
+            displayName: displayName,
+            appPath: url.path,
+            workspace: "",
+        )
+        draft.append(rule)
+        markDirty()
+    }
+
+    private func save() {
+        let snapshot = draft
+        saveStatus = .saving
+        Task { @MainActor in
+            do {
+                var next = store.state
+                next.appRouting = snapshot
+                try store.replace(next)
+                let configUrl = SettingsConfigPath.aerospaceTomlUrl()
+                try TomlMarkerWriter.writeBlock(state: next, to: configUrl)
+                if let token: RunSessionGuard = .isServerEnabled {
+                    try await runLightSession(.menuBarButton, token) {
+                        _ = try await reloadConfig()
+                    }
+                }
+                saveStatus = .saved
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if saveStatus == .saved { saveStatus = .clean }
+            } catch {
+                saveStatus = .error("Save failed: \(error)")
+            }
+        }
+    }
+}
+
+private struct AppRoutingRow: View {
+    @Binding var rule: AppRoutingRule
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            appIcon
+                .frame(width: 24, height: 24)
+            Text(rule.displayName)
+                .frame(minWidth: 120, alignment: .leading)
+                .lineLimit(1)
+            Text(rule.appId)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            TextField("workspace", text: $rule.workspace)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 84)
+            Picker("", selection: $rule.layout) {
+                ForEach(AppLayout.allCases) { layout in
+                    Text(layout.displayName).tag(layout)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(width: 100)
+            Button(role: .destructive, action: onDelete) {
+                Image(systemName: "minus.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(.textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var appIcon: some View {
+        if let path = rule.appPath {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                .resizable()
+                .interpolation(.high)
+        } else {
+            Image(systemName: "app.dashed")
+                .resizable()
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Resolves the user's `~/.aerospace.toml` (XDG-aware) with a sensible fallback
+/// when no file exists yet — matches the lookup used by Open-Config in MenuBar.
+enum SettingsConfigPath {
+    static func aerospaceTomlUrl() -> URL {
+        switch findCustomConfigUrl() {
+            case .file(let url): return url
+            case .noCustomConfigExists, .ambiguousConfigError:
+                return FileManager.default.homeDirectoryForCurrentUser
+                    .appending(path: configDotfileName)
         }
     }
 }
