@@ -22,6 +22,91 @@ struct AppRoutingRule: Codable, Equatable, Identifiable {
     /// Workspace name (e.g. "q", "1", "main"). Free-form; matches `move-node-to-workspace <name>`.
     var workspace: String
     var layout: AppLayout = .tiling
+    /// Per-window position within the workspace (Phase 3.6). `.full` = no slot constraint
+    /// (default tiling behaviour); other values pin the window to a specific sub-area.
+    var slot: Slot = .full
+
+    init(
+        id: UUID = UUID(),
+        appId: String,
+        displayName: String,
+        appPath: String? = nil,
+        workspace: String,
+        layout: AppLayout = .tiling,
+        slot: Slot = .full,
+    ) {
+        self.id = id
+        self.appId = appId
+        self.displayName = displayName
+        self.appPath = appPath
+        self.workspace = workspace
+        self.layout = layout
+        self.slot = slot
+    }
+
+    // Custom decoder so older JSON sidecars (pre-Phase-3.6, no `slot` field)
+    // load with sensible defaults instead of throwing.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        appId = try c.decode(String.self, forKey: .appId)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        appPath = try c.decodeIfPresent(String.self, forKey: .appPath)
+        workspace = try c.decode(String.self, forKey: .workspace)
+        layout = try c.decodeIfPresent(AppLayout.self, forKey: .layout) ?? .tiling
+        slot = try c.decodeIfPresent(Slot.self, forKey: .slot) ?? .full
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, appId, displayName, appPath, workspace, layout, slot
+    }
+}
+
+/// Per-window slot inside a workspace. The placement logic lives in the
+/// MacWindow.getOrRegister hook (Phase 3.6); TOML still just carries
+/// `move-node-to-workspace`. `.full` means "no slot constraint".
+enum Slot: String, Codable, CaseIterable, Identifiable {
+    case full         = "full"
+    case leftHalf     = "left-half"
+    case rightHalf    = "right-half"
+    case topHalf      = "top-half"
+    case bottomHalf   = "bottom-half"
+    case topLeft      = "top-left"
+    case topRight     = "top-right"
+    case bottomLeft   = "bottom-left"
+    case bottomRight  = "bottom-right"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+            case .full:        return "Full workspace"
+            case .leftHalf:    return "Left half"
+            case .rightHalf:   return "Right half"
+            case .topHalf:     return "Top half"
+            case .bottomHalf:  return "Bottom half"
+            case .topLeft:     return "Top left"
+            case .topRight:    return "Top right"
+            case .bottomLeft:  return "Bottom left"
+            case .bottomRight: return "Bottom right"
+        }
+    }
+
+    /// Two slots conflict when one is contained within the other (e.g. `leftHalf`
+    /// covers `topLeft` + `bottomLeft`). Used by the UI to surface overlap warnings.
+    func overlaps(_ other: Slot) -> Bool {
+        if self == other { return true }
+        let half: (Slot) -> Set<Slot> = {
+            switch $0 {
+                case .leftHalf:    return [.leftHalf, .topLeft, .bottomLeft]
+                case .rightHalf:   return [.rightHalf, .topRight, .bottomRight]
+                case .topHalf:     return [.topHalf, .topLeft, .topRight]
+                case .bottomHalf:  return [.bottomHalf, .bottomLeft, .bottomRight]
+                default:           return [$0]
+            }
+        }
+        return !half(self).isDisjoint(with: half(other))
+    }
 }
 
 enum AppLayout: String, Codable, CaseIterable, Identifiable {

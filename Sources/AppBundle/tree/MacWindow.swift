@@ -262,9 +262,11 @@ private func onWindowDetected(_ window: Window) async throws {
     for callback in config.onWindowDetected where try await callback.matches(window) {
         _ = try await callback.run.runCmdSeq(.defaultEnv.copy(\.windowId, window.windowId), .emptyStdin)
         if !callback.checkFurtherCallbacks {
+            applySlotPlacement(window) // Phase 3.6: respect slot rules even on early-out
             return
         }
     }
+    applySlotPlacement(window) // Phase 3.6: per-rule slot positioning inside the workspace
 }
 
 extension WindowDetectedCallback {

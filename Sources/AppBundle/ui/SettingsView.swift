@@ -121,8 +121,12 @@ private struct AppRoutingSection: View {
             ScrollView {
                 VStack(spacing: 4) {
                     ForEach($draft) { $rule in
-                        AppRoutingRow(rule: $rule, onDelete: { remove(rule) })
-                            .onChange(of: rule) { _ in markDirty() }
+                        AppRoutingRow(
+                            rule: $rule,
+                            conflictsWith: conflictsByRule[rule.id] ?? [],
+                            onDelete: { remove(rule) },
+                        )
+                        .onChange(of: rule) { _ in markDirty() }
                     }
                     if draft.isEmpty {
                         Text("No rules yet. Click \u{201C}Add app\u{2026}\u{201D} to pick an app from /Applications.")
@@ -144,7 +148,7 @@ private struct AppRoutingSection: View {
                 Button("Save") { save() }
                     .keyboardShortcut("s", modifiers: .command)
                     .buttonStyle(.borderedProminent)
-                    .disabled(!saveStatus.isDirty || hasInvalidRules)
+                    .disabled(!saveStatus.isDirty || hasInvalidRules || hasConflicts)
             }
         }
         .onAppear { resetDraft() }
@@ -156,12 +160,17 @@ private struct AppRoutingSection: View {
 
     @ViewBuilder
     private var statusLabel: some View {
-        switch saveStatus {
-            case .clean:                EmptyView()
-            case .dirty:                Text("Unsaved changes").foregroundStyle(.orange).font(.caption)
-            case .saving:               Text("Saving\u{2026}").foregroundStyle(.secondary).font(.caption)
-            case .error(let message):   Text(message).foregroundStyle(.red).font(.caption).lineLimit(2)
-            case .saved:                Label("Saved", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.caption)
+        if hasConflicts {
+            Label("Slot conflict — fix the highlighted rows", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange).font(.caption)
+        } else {
+            switch saveStatus {
+                case .clean:                EmptyView()
+                case .dirty:                Text("Unsaved changes").foregroundStyle(.orange).font(.caption)
+                case .saving:               Text("Saving\u{2026}").foregroundStyle(.secondary).font(.caption)
+                case .error(let message):   Text(message).foregroundStyle(.red).font(.caption).lineLimit(2)
+                case .saved:                Label("Saved", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.caption)
+            }
         }
     }
 
@@ -172,6 +181,26 @@ private struct AppRoutingSection: View {
                 || rule.appId.contains("'")
         }
     }
+
+    /// For each rule with at least one overlap, the names of the colliding rules.
+    /// Two rules collide when they target the same workspace and their slots overlap
+    /// (e.g. `leftHalf` overlaps `topLeft`). Used to disable Save and surface a row warning.
+    private var conflictsByRule: [UUID: [String]] {
+        var result: [UUID: [String]] = [:]
+        for a in draft {
+            let cleanA = a.workspace.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanA.isEmpty else { continue }
+            let collisions = draft.filter { b in
+                guard a.id != b.id else { return false }
+                let cleanB = b.workspace.trimmingCharacters(in: .whitespacesAndNewlines)
+                return cleanA == cleanB && a.slot.overlaps(b.slot)
+            }
+            if !collisions.isEmpty { result[a.id] = collisions.map(\.displayName) }
+        }
+        return result
+    }
+
+    private var hasConflicts: Bool { !conflictsByRule.isEmpty }
 
     private func resetDraft() {
         draft = store.state.appRouting
@@ -242,30 +271,48 @@ private struct AppRoutingSection: View {
 
 private struct AppRoutingRow: View {
     @Binding var rule: AppRoutingRule
+    let conflictsWith: [String]
     let onDelete: () -> Void
+
+    private var hasConflict: Bool { !conflictsWith.isEmpty }
 
     var body: some View {
         HStack(spacing: 12) {
             appIcon
                 .frame(width: 24, height: 24)
-            Text(rule.displayName)
-                .frame(minWidth: 120, alignment: .leading)
-                .lineLimit(1)
-            Text(rule.appId)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(rule.displayName)
+                    .frame(minWidth: 100, alignment: .leading)
+                    .lineLimit(1)
+                Text(rule.appId)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            .frame(minWidth: 140, alignment: .leading)
             Spacer(minLength: 8)
             TextField("workspace", text: $rule.workspace)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 84)
+                .frame(width: 72)
+            Picker("", selection: $rule.slot) {
+                ForEach(Slot.allCases) { slot in
+                    Text(slot.displayName).tag(slot)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(width: 130)
             Picker("", selection: $rule.layout) {
                 ForEach(AppLayout.allCases) { layout in
                     Text(layout.displayName).tag(layout)
                 }
             }
             .pickerStyle(.menu)
-            .frame(width: 100)
+            .frame(width: 90)
+            if hasConflict {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help("Slot overlaps with: " + conflictsWith.joined(separator: ", "))
+            }
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "minus.circle.fill")
                     .foregroundStyle(.secondary)
@@ -276,6 +323,10 @@ private struct AppRoutingRow: View {
         .padding(.vertical, 6)
         .background(Color(.textBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(hasConflict ? Color.orange : Color.clear, lineWidth: 1.5),
+        )
     }
 
     @ViewBuilder

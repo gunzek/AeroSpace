@@ -52,6 +52,7 @@ xcodebuild -version
 
 # Build without auto-codesign; we strip xattrs from the bundle and sign manually after.
 xcodebuild-pretty .release/xcodebuild.log clean build \
+    -project AeroSpace.xcodeproj \
     -scheme AeroSpace \
     -destination "generic/platform=macOS" \
     -configuration "$xcode_configuration" \
