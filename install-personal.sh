@@ -25,7 +25,14 @@ cp -r .release/AeroSpace.app /Applications/
 xattr -rc /Applications/AeroSpace.app
 
 open /Applications/AeroSpace.app
-sleep 2
+
+# Wait up to 8 s for the agent process to come up. macOS LaunchServices can take
+# a couple of seconds on first launch after a binary swap, especially when
+# Gatekeeper has to evaluate the new code-signing hash.
+for _ in 1 2 3 4 5 6 7 8; do
+    if pgrep -x AeroSpace > /dev/null; then break; fi
+    sleep 1
+done
 
 if pgrep -x AeroSpace > /dev/null; then
     echo "✅ AeroSpace running (pid $(pgrep -x AeroSpace))"

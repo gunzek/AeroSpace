@@ -24,6 +24,7 @@ public func getSettingsWindow() -> some Scene {
 
 struct SettingsView: View {
     @State private var selection: SettingsSection = .appRouting
+    @StateObject private var store = UISettingsStore.shared
 
     var body: some View {
         NavigationSplitView {
@@ -36,12 +37,12 @@ struct SettingsView: View {
         } detail: {
             Group {
                 switch selection {
-                    case .appRouting: AppRoutingPlaceholder()
-                    case .homepage:   HomepagePlaceholder()
+                    case .appRouting:  AppRoutingPlaceholder(store: store)
+                    case .homepage:    HomepagePlaceholder(store: store)
                     case .keybindings: ComingSoonView(title: "Keybindings", phase: "Phase 2")
                     case .gaps:        ComingSoonView(title: "Gaps", phase: "Phase 2")
                     case .catchAll:    ComingSoonView(title: "Catch-all workspaces", phase: "Phase 3")
-                    case .about:       AboutSection()
+                    case .about:       AboutSection(store: store)
                 }
             }
             .frame(minWidth: 480, minHeight: 360)
@@ -84,20 +85,39 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 }
 
 private struct AppRoutingPlaceholder: View {
+    @ObservedObject var store: UISettingsStore
+
     var body: some View {
         SettingsScaffold(title: "App Routing") {
-            Text("Pin apps to specific workspaces. Coming in the next step of Phase 1.")
+            Text("Pin apps to specific workspaces. Editable UI ships in Phase 1.4.")
                 .foregroundStyle(.secondary)
+            Text("Currently saved: \(store.state.appRouting.count) rule\(store.state.appRouting.count == 1 ? "" : "s")")
+                .font(.system(.body, design: .monospaced))
             Spacer()
         }
     }
 }
 
 private struct HomepagePlaceholder: View {
+    @ObservedObject var store: UISettingsStore
+
     var body: some View {
         SettingsScaffold(title: "Homepage") {
             Text("Launch all routed apps with a single click. Wired up after App Routing is in place.")
                 .foregroundStyle(.secondary)
+            Toggle("Launch on AeroSpace startup", isOn: Binding(
+                get: { store.state.homepage.launchOnStartup },
+                set: { newValue in
+                    try? store.update { $0.homepage.launchOnStartup = newValue }
+                },
+            ))
+            .toggleStyle(.switch)
+            .disabled(store.state.appRouting.isEmpty)
+            if store.state.appRouting.isEmpty {
+                Text("Add at least one App Routing rule first.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
             Spacer()
         }
     }
@@ -117,6 +137,8 @@ private struct ComingSoonView: View {
 }
 
 private struct AboutSection: View {
+    @ObservedObject var store: UISettingsStore
+
     var body: some View {
         SettingsScaffold(title: "About") {
             VStack(alignment: .leading, spacing: 8) {
@@ -125,6 +147,21 @@ private struct AboutSection: View {
                 Text("Personal fork — \(gitShortHash)")
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(.secondary)
+                Divider().padding(.vertical, 4)
+                Text("UI state file:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Text(store.url.path)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                    Spacer()
+                    Button("Reveal") {
+                        NSWorkspace.shared.activateFileViewerSelecting([store.url])
+                    }
+                    .controlSize(.small)
+                    .disabled(!FileManager.default.fileExists(atPath: store.url.path))
+                }
             }
             Spacer()
         }

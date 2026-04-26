@@ -31,8 +31,9 @@ done
 # Generate xcodeproj with our build version + codesign identity.
 # We skip check-uncommitted-files.sh: upstream uses it to catch xcodegen-output drift,
 # but in a personal fork the xcodeproj will always differ (directory name leaks into
-# pbxproj package references) and that's fine — `git checkout .` after the build
-# restores the upstream-tracked file.
+# pbxproj package references) and that's fine — we revert the xcodeproj after
+# the build (only the xcodeproj — narrower than upstream's `git checkout .`,
+# which would also wipe any work-in-progress source edits).
 ./generate.sh --build-version "$build_version" --codesign-identity "$codesign_identity" --generate-git-hash --ignore-cmd-help --ignore-shell-parser
 
 # CLI (universal binary)
@@ -57,7 +58,7 @@ xcodebuild-pretty .release/xcodebuild.log clean build \
     -derivedDataPath .xcode-build \
     CODE_SIGNING_ALLOWED=NO
 
-git checkout .
+git checkout -- AeroSpace.xcodeproj
 
 cp -r ".xcode-build/Build/Products/$xcode_configuration/AeroSpace.app" .release
 cp -r .build/apple/Products/Release/aerospace .release
