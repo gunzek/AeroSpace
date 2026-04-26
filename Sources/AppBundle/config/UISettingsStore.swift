@@ -7,8 +7,83 @@ struct UIState: Codable, Equatable {
     var version: Int = uiStateVersion
     var appRouting: [AppRoutingRule] = []
     var homepage: HomepageSettings = .default
+    /// `nil` means "leave gaps to whatever the user has in their raw TOML";
+    /// non-nil means UI is managing the `[gaps]` section.
+    var gaps: GapsSettings? = nil
+    var catchAll: CatchAllSettings = .default
+    /// `nil` = "leave [mode.main.binding] to whatever the user has";
+    /// non-nil = UI manages the keybinding table.
+    var keybindings: [KeybindingRule]? = nil
 
     static let empty = UIState()
+
+    init(
+        version: Int = uiStateVersion,
+        appRouting: [AppRoutingRule] = [],
+        homepage: HomepageSettings = .default,
+        gaps: GapsSettings? = nil,
+        catchAll: CatchAllSettings = .default,
+        keybindings: [KeybindingRule]? = nil,
+    ) {
+        self.version = version
+        self.appRouting = appRouting
+        self.homepage = homepage
+        self.gaps = gaps
+        self.catchAll = catchAll
+        self.keybindings = keybindings
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? uiStateVersion
+        appRouting = try c.decodeIfPresent([AppRoutingRule].self, forKey: .appRouting) ?? []
+        homepage = try c.decodeIfPresent(HomepageSettings.self, forKey: .homepage) ?? .default
+        gaps = try c.decodeIfPresent(GapsSettings.self, forKey: .gaps)
+        catchAll = try c.decodeIfPresent(CatchAllSettings.self, forKey: .catchAll) ?? .default
+        keybindings = try c.decodeIfPresent([KeybindingRule].self, forKey: .keybindings)
+    }
+
+    enum CodingKeys: String, CodingKey { case version, appRouting, homepage, gaps, catchAll, keybindings }
+}
+
+/// One row in the `[mode.main.binding]` table. Stored as raw strings rather
+/// than typed enums because AeroSpace's binding action grammar (workspace
+/// names, multi-action sequences via `\;`, custom mode switches) is wider than
+/// a useful preset list — the UI surfaces a help blurb listing common forms.
+struct KeybindingRule: Codable, Equatable, Identifiable {
+    var id: UUID = UUID()
+    /// Shortcut in AeroSpace format, e.g. `alt-q`, `alt-shift-h`. Lowercase only.
+    var shortcut: String
+    /// Action string, e.g. `workspace q`, `focus left`, `reload-config`.
+    var action: String
+}
+
+/// Phase 3.5: redirect unrouted apps off "reserved" homepage workspaces once
+/// they hit a window-count limit. A workspace is reserved iff at least one
+/// AppRoutingRule targets it; that's the heuristic we use to decide what
+/// counts as "homepage".
+struct CatchAllSettings: Codable, Equatable {
+    var enabled: Bool = false
+    /// Threshold on the *number of windows already on the workspace* before a
+    /// new unrouted window gets bumped. Default 3 — a value Honza picked.
+    var workspaceLimit: Int = 3
+    /// Workspaces eligible to receive redirected windows. Round-robin order.
+    var catchAllWorkspaces: [String] = []
+
+    static let `default` = CatchAllSettings()
+}
+
+struct GapsSettings: Codable, Equatable {
+    /// Horizontal padding *between* tiled windows (pixels).
+    var innerHorizontal: Int = 0
+    /// Vertical padding *between* tiled windows (pixels).
+    var innerVertical: Int = 0
+    /// Padding from the screen edges, applied to both left and right.
+    /// (Asymmetric outer gaps are intentionally not in the UI — edit the raw
+    /// `[gaps]` TOML by hand if you need that.)
+    var outerHorizontal: Int = 0
+    /// Padding from the screen edges, applied to both top and bottom.
+    var outerVertical: Int = 0
 }
 
 struct AppRoutingRule: Codable, Equatable, Identifiable {

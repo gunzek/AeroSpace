@@ -41,9 +41,10 @@ struct SettingsView: View {
                 switch selection {
                     case .appRouting:  AppRoutingSection(store: store)
                     case .homepage:    HomepageSection(store: store)
-                    case .keybindings: ComingSoonView(title: "Keybindings", phase: "Phase 2")
-                    case .gaps:        ComingSoonView(title: "Gaps", phase: "Phase 2")
-                    case .catchAll:    ComingSoonView(title: "Catch-all workspaces", phase: "Phase 3")
+                    case .keybindings: KeybindingsSection(store: store)
+                    case .gaps:        GapsSection(store: store)
+                    case .catchAll:    CatchAllSection(store: store)
+                    case .tweaks:      TweaksSection()
                     case .about:       AboutSection(store: store)
                 }
             }
@@ -59,6 +60,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case keybindings
     case gaps
     case catchAll
+    case tweaks
     case about
 
     var id: String { rawValue }
@@ -70,6 +72,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
             case .keybindings: return "Keybindings"
             case .gaps:        return "Gaps"
             case .catchAll:    return "Catch-all"
+            case .tweaks:      return "Tweaks"
             case .about:       return "About"
         }
     }
@@ -81,6 +84,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
             case .keybindings: return "keyboard"
             case .gaps:        return "ruler"
             case .catchAll:    return "tray.2"
+            case .tweaks:      return "gearshape.2"
             case .about:       return "info.circle"
         }
     }
@@ -257,6 +261,10 @@ private struct AppRoutingSection: View {
                 if let token: RunSessionGuard = .isServerEnabled {
                     try await runLightSession(.menuBarButton, token) {
                         _ = try await reloadConfig()
+                        // Phase 3.6 follow-up: snap currently-open windows to any new slot
+                        // assignments. Without this, slot edits would only take effect for
+                        // windows opened after Save, not the ones already on screen.
+                        reapplySlotPlacementForAllWindows()
                     }
                 }
                 saveStatus = .saved
@@ -414,6 +422,357 @@ private struct ComingSoonView: View {
         SettingsScaffold(title: title) {
             Text("Planned for \(phase).")
                 .foregroundStyle(.secondary)
+            Spacer()
+        }
+    }
+}
+
+private struct KeybindingsSection: View {
+    @ObservedObject var store: UISettingsStore
+    @State private var draft: [KeybindingRule]? = nil
+    @State private var saveStatus: String? = nil
+    @State private var dirty: Bool = false
+
+    private var managed: Bool { draft != nil }
+
+    var body: some View {
+        SettingsScaffold(title: "Keybindings") {
+            Text("UI-managed `[mode.main.binding]` table. When enabled, Settings UI owns this section — remove any `[mode.main.binding]` table from ~/.aerospace.toml first or Save will refuse.")
+                .foregroundStyle(.secondary)
+
+            Toggle("Manage keybindings from this UI", isOn: Binding(
+                get: { managed },
+                set: { newValue in
+                    draft = newValue ? (draft ?? []) : nil
+                    dirty = true
+                },
+            ))
+            .toggleStyle(.switch)
+
+            if let bindings = draft {
+                ScrollView {
+                    VStack(spacing: 4) {
+                        ForEach(Array(bindings.enumerated()), id: \.element.id) { idx, rule in
+                            HStack(spacing: 8) {
+                                TextField("alt-q", text: shortcutBinding(at: idx))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 120)
+                                    .font(.system(.body, design: .monospaced))
+                                Text("=")
+                                    .foregroundStyle(.tertiary)
+                                TextField("workspace q", text: actionBinding(at: idx))
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(.body, design: .monospaced))
+                                Button(role: .destructive) {
+                                    draft?.remove(at: idx)
+                                    dirty = true
+                                } label: {
+                                    Image(systemName: "minus.circle.fill")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color(.textBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        }
+                        if bindings.isEmpty {
+                            Text("No bindings yet. Click \u{201C}Add binding\u{201D} below.")
+                                .foregroundStyle(.tertiary)
+                                .padding(.vertical, 16)
+                        }
+                    }
+                }
+                .frame(minHeight: 160)
+                .background(Color(.controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                HStack {
+                    Button {
+                        draft?.append(KeybindingRule(shortcut: "", action: ""))
+                        dirty = true
+                    } label: {
+                        Label("Add binding", systemImage: "plus")
+                    }
+                    Spacer()
+                }
+
+                Text("Action examples: `workspace q`, `focus left`, `move right`, `reload-config`, `layout floating tiling`, `close`. See AeroSpace docs for the full grammar.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                if let saveStatus {
+                    Text(saveStatus)
+                        .font(.caption)
+                        .foregroundStyle(saveStatus.hasPrefix("Error") ? .red : .secondary)
+                }
+                Spacer()
+                Button("Save") { save() }
+                    .keyboardShortcut("s", modifiers: .command)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!dirty)
+            }
+            Spacer()
+        }
+        .onAppear { draft = store.state.keybindings; dirty = false }
+        .onChange(of: store.state.keybindings) { newValue in
+            if !dirty { draft = newValue }
+        }
+    }
+
+    private func shortcutBinding(at idx: Int) -> Binding<String> {
+        Binding(
+            get: { draft?[idx].shortcut ?? "" },
+            set: { draft?[idx].shortcut = $0; dirty = true },
+        )
+    }
+
+    private func actionBinding(at idx: Int) -> Binding<String> {
+        Binding(
+            get: { draft?[idx].action ?? "" },
+            set: { draft?[idx].action = $0; dirty = true },
+        )
+    }
+
+    private func save() {
+        let snapshot = draft
+        Task { @MainActor in
+            do {
+                var next = store.state
+                next.keybindings = snapshot
+                try store.replace(next)
+                let configUrl = SettingsConfigPath.aerospaceTomlUrl()
+                try TomlMarkerWriter.writeBlock(state: next, to: configUrl)
+                if let token: RunSessionGuard = .isServerEnabled {
+                    try await runLightSession(.menuBarButton, token) { _ = try await reloadConfig() }
+                }
+                dirty = false
+                saveStatus = "Saved"
+            } catch let TomlMarkerWriter.WriteError.duplicateBindingSection {
+                saveStatus = "Error: remove the existing [mode.main.binding] table from ~/.aerospace.toml before enabling UI-managed keybindings."
+            } catch let TomlMarkerWriter.WriteError.unsafeLiteral(field, value) {
+                saveStatus = "Error: \(field) contains an unsafe character ('\(value)'). Single quotes are not allowed."
+            } catch {
+                saveStatus = "Error: \(error)"
+            }
+        }
+    }
+}
+
+private struct CatchAllSection: View {
+    @ObservedObject var store: UISettingsStore
+    @State private var newWorkspaceField: String = ""
+
+    var body: some View {
+        let settings = store.state.catchAll
+
+        SettingsScaffold(title: "Catch-all workspaces") {
+            Text("When a homepage workspace already holds enough windows, redirect new unrouted apps to a catch-all workspace instead of cramming them in. Routed apps always land on their pinned workspace regardless.")
+                .foregroundStyle(.secondary)
+
+            Toggle("Reserve homepage workspaces", isOn: Binding(
+                get: { settings.enabled },
+                set: { newValue in mutate { $0.enabled = newValue } },
+            ))
+            .toggleStyle(.switch)
+
+            HStack {
+                Text("Window limit per workspace").frame(width: 200, alignment: .leading)
+                Stepper(value: Binding(
+                    get: { settings.workspaceLimit },
+                    set: { newValue in mutate { $0.workspaceLimit = max(1, newValue) } },
+                ), in: 1 ... 10) {
+                    Text("\(settings.workspaceLimit)")
+                        .font(.system(.body, design: .monospaced))
+                        .frame(width: 32, alignment: .trailing)
+                }
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Catch-all workspaces (round-robin order)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                if settings.catchAllWorkspaces.isEmpty {
+                    Text("None — add at least one to enable redirection.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    ForEach(Array(settings.catchAllWorkspaces.enumerated()), id: \.offset) { idx, name in
+                        HStack {
+                            Text("\(idx + 1).")
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                            Text(name)
+                                .font(.system(.body, design: .monospaced))
+                            Spacer()
+                            Button(role: .destructive) {
+                                mutate { $0.catchAllWorkspaces.remove(at: idx) }
+                            } label: {
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(.textBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                }
+                HStack {
+                    TextField("workspace name (e.g. t)", text: $newWorkspaceField)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Add") { addWorkspace() }
+                        .disabled(newWorkspaceField.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    private func addWorkspace() {
+        let name = newWorkspaceField.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        mutate { settings in
+            if !settings.catchAllWorkspaces.contains(name) {
+                settings.catchAllWorkspaces.append(name)
+            }
+        }
+        newWorkspaceField = ""
+    }
+
+    private func mutate(_ change: (inout CatchAllSettings) -> Void) {
+        var settings = store.state.catchAll
+        change(&settings)
+        try? store.update { $0.catchAll = settings }
+    }
+}
+
+private struct GapsSection: View {
+    @ObservedObject var store: UISettingsStore
+    @State private var draft: GapsSettings? = nil
+    @State private var saveStatus: String? = nil
+
+    private var managed: Bool { draft != nil }
+
+    var body: some View {
+        SettingsScaffold(title: "Gaps") {
+            Text("Padding between tiled windows and the screen edges. When enabled, Settings UI owns the `[gaps]` section in ~/.aerospace.toml — the raw `[gaps]` block (if any) must be removed first.")
+                .foregroundStyle(.secondary)
+
+            Toggle("Manage gaps from this UI", isOn: Binding(
+                get: { managed },
+                set: { newValue in
+                    draft = newValue ? (draft ?? GapsSettings()) : nil
+                    persist()
+                },
+            ))
+            .toggleStyle(.switch)
+
+            if let bound = draft {
+                let binding = Binding<GapsSettings>(
+                    get: { bound },
+                    set: { newValue in draft = newValue; persist() },
+                )
+                VStack(spacing: 8) {
+                    GapSlider(label: "Inner horizontal", value: binding.innerHorizontal)
+                    GapSlider(label: "Inner vertical",   value: binding.innerVertical)
+                    GapSlider(label: "Outer horizontal", value: binding.outerHorizontal)
+                    GapSlider(label: "Outer vertical",   value: binding.outerVertical)
+                }
+                .padding(8)
+                .background(Color(.controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+
+            if let saveStatus {
+                Text(saveStatus)
+                    .font(.caption)
+                    .foregroundStyle(saveStatus.hasPrefix("Error") ? .red : .secondary)
+            }
+            Spacer()
+        }
+        .onAppear { draft = store.state.gaps }
+        .onChange(of: store.state.gaps) { newValue in
+            // External update wins only if user hasn't been touching the sliders.
+            if draft != newValue { draft = newValue }
+        }
+    }
+
+    private func persist() {
+        let snapshot = draft
+        Task { @MainActor in
+            do {
+                var next = store.state
+                next.gaps = snapshot
+                try store.replace(next)
+                let configUrl = SettingsConfigPath.aerospaceTomlUrl()
+                try TomlMarkerWriter.writeBlock(state: next, to: configUrl)
+                if let token: RunSessionGuard = .isServerEnabled {
+                    try await runLightSession(.menuBarButton, token) { _ = try await reloadConfig() }
+                }
+                saveStatus = "Saved"
+            } catch let TomlMarkerWriter.WriteError.duplicateGapsSection {
+                saveStatus = "Error: remove the existing [gaps] block from ~/.aerospace.toml before enabling UI-managed gaps."
+            } catch {
+                saveStatus = "Error: \(error)"
+            }
+        }
+    }
+}
+
+private struct GapSlider: View {
+    let label: String
+    @Binding var value: Int
+
+    var body: some View {
+        HStack {
+            Text(label).frame(width: 140, alignment: .leading)
+            Slider(
+                value: Binding(
+                    get: { Double(value) },
+                    set: { value = Int($0.rounded()) },
+                ),
+                in: 0 ... 50,
+                step: 1,
+            )
+            Text("\(value) px")
+                .font(.system(.body, design: .monospaced))
+                .frame(width: 56, alignment: .trailing)
+        }
+    }
+}
+
+private struct TweaksSection: View {
+    @State private var resizeSpedUp = SystemTweaks.isResizeSpedUp()
+
+    var body: some View {
+        SettingsScaffold(title: "Tweaks") {
+            Text("System-wide adjustments that complement AeroSpace. These touch macOS defaults outside the app.")
+                .foregroundStyle(.secondary)
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Speed up window resize animations (macOS-wide)", isOn: Binding(
+                        get: { resizeSpedUp },
+                        set: { newValue in
+                            _ = SystemTweaks.setResizeSpedUp(newValue)
+                            resizeSpedUp = SystemTweaks.isResizeSpedUp()
+                        },
+                    ))
+                    .toggleStyle(.switch)
+                    Text("Sets `NSWindowResizeTime` to \(String(format: "%.3f", SystemTweaks.fastResize)) s. macOS default is ~0.2 s, which dominates the perceived latency when AeroSpace re-tiles a workspace. Most apps pick the new value up immediately; some need a relaunch.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(8)
+            }
             Spacer()
         }
     }

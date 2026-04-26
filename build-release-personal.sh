@@ -59,7 +59,12 @@ xcodebuild-pretty .release/xcodebuild.log clean build \
     -derivedDataPath .xcode-build \
     CODE_SIGNING_ALLOWED=NO
 
-git checkout -- AeroSpace.xcodeproj
+# Revert files that the build pipeline overwrites with per-build values, so
+# they don't show up as "modified" in `git status` and don't pollute commits.
+# `Sources/Common/gitHashGenerated.swift` and `versionGenerated.swift` get
+# rewritten by `./generate.sh --generate-git-hash`; xcodeproj gets rewritten
+# by xcodegen.
+git checkout -- AeroSpace.xcodeproj Sources/Common/gitHashGenerated.swift Sources/Common/versionGenerated.swift
 
 cp -r ".xcode-build/Build/Products/$xcode_configuration/AeroSpace.app" .release
 cp -r .build/apple/Products/Release/aerospace .release

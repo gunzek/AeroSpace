@@ -27,6 +27,19 @@ func applySlotPlacement(_ window: Window) {
     placeWindowInSlot(window, slot: rule.slot, workspace: workspace)
 }
 
+/// 3.6 follow-up: walk every currently-known window and re-apply the slot
+/// constraint defined by its routing rule. Called after a Settings UI Save so
+/// existing windows snap to the layout the user just edited (the upstream
+/// on-window-detected hook only fires for *new* windows).
+@MainActor
+func reapplySlotPlacementForAllWindows() {
+    let state = UISettingsStore.shared.state
+    if state.appRouting.allSatisfy({ $0.slot == .full }) { return }
+    for window in MacWindow.allWindows {
+        applySlotPlacement(window)
+    }
+}
+
 @MainActor
 private func placeWindowInSlot(_ window: Window, slot: Slot, workspace: Workspace) {
     let root = workspace.rootTilingContainer
