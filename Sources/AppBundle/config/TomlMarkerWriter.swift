@@ -147,4 +147,82 @@ enum TomlMarkerWriter {
             throw WriteError.unsafeLiteral(field: field, value: value)
         }
     }
+
+    // MARK: import + strip helpers
+
+    /// Parse the user's existing `[mode.main.binding]` section into
+    /// `(shortcut, action)` pairs. Comments are skipped. Multi-action arrays
+    /// (e.g. `['reload-config', 'mode main']`) come back with their raw `[...]`
+    /// form intact so the UI's Custom-action template can round-trip them.
+    static func extractBindingSection(from existing: String) -> [(shortcut: String, action: String)] {
+        let lines = existing.components(separatedBy: "\n")
+        var insideMarker = false
+        var insideBinding = false
+        var result: [(String, String)] = []
+        for raw in lines {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix(startKey) { insideMarker = true; insideBinding = false; continue }
+            if line.hasPrefix(endKey)   { insideMarker = false; insideBinding = false; continue }
+            if insideMarker { continue }
+            if line == "[mode.main.binding]" { insideBinding = true; continue }
+            if insideBinding, line.hasPrefix("["), line.hasSuffix("]") {
+                insideBinding = false
+                continue
+            }
+            if !insideBinding { continue }
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            guard let equalsIdx = line.firstIndex(of: "=") else { continue }
+            let key = String(line[..<equalsIdx]).trimmingCharacters(in: .whitespaces)
+            var value = String(line[line.index(after: equalsIdx)...]).trimmingCharacters(in: .whitespaces)
+            value = stripInlineComment(value)
+            if value.hasPrefix("'"), value.hasSuffix("'"), value.count >= 2 {
+                result.append((key, String(value.dropFirst().dropLast())))
+            } else if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
+                result.append((key, String(value.dropFirst().dropLast())))
+            } else if value.hasPrefix("["), value.hasSuffix("]") {
+                result.append((key, value))
+            }
+        }
+        return result
+    }
+
+    /// Drop the user's `[mode.main.binding]` section (header + body up to the
+    /// next top-level header or EOF) but leave anything inside the AEROSPACE-UI
+    /// markers untouched. Used by the "Import & take over" flow.
+    static func stripBindingSection(from existing: String) -> String {
+        let lines = existing.components(separatedBy: "\n")
+        var out: [String] = []
+        var insideMarker = false
+        var skip = false
+        for raw in lines {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix(startKey) { insideMarker = true; out.append(raw); continue }
+            if line.hasPrefix(endKey)   { insideMarker = false; out.append(raw); continue }
+            if insideMarker { out.append(raw); continue }
+            if line == "[mode.main.binding]" { skip = true; continue }
+            if skip, line.hasPrefix("["), line.hasSuffix("]") { skip = false }
+            if skip { continue }
+            out.append(raw)
+        }
+        return out.joined(separator: "\n")
+    }
+
+    /// Strip an inline `# comment` from a TOML value, but only when the `#`
+    /// sits outside any `'` or `"` quote. Default-config bindings use this
+    /// idiom heavily (`alt-q = 'workspace q' # switch to writing workspace`).
+    private static func stripInlineComment(_ value: String) -> String {
+        var inSingle = false
+        var inDouble = false
+        var idx = value.startIndex
+        while idx < value.endIndex {
+            let ch = value[idx]
+            if ch == "'", !inDouble { inSingle.toggle() }
+            else if ch == "\"", !inSingle { inDouble.toggle() }
+            else if ch == "#", !inSingle, !inDouble {
+                return String(value[..<idx]).trimmingCharacters(in: .whitespaces)
+            }
+            idx = value.index(after: idx)
+        }
+        return value
+    }
 }

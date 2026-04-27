@@ -475,6 +475,22 @@ private struct KeybindingsSection: View {
             ))
             .toggleStyle(.switch)
 
+            if managed, hasUnmanagedBlockInToml() {
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Existing [mode.main.binding] found in your TOML", systemImage: "info.circle")
+                            .font(.subheadline)
+                        Text("Click \u{201C}Import existing bindings\u{201D} to pull every shortcut from your raw config into this list and have Settings UI take over from there. The original section will be removed on the next Save.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Import existing bindings") { importFromConfig() }
+                            .buttonStyle(.bordered)
+                    }
+                    .padding(8)
+                }
+            }
+
             if let bindings = draft {
                 ScrollView {
                     VStack(spacing: 4) {
@@ -571,6 +587,50 @@ private struct KeybindingsSection: View {
                 saveStatus = "Error: \(error)"
             }
         }
+    }
+
+    /// Cache-free check: re-reads the TOML each time it's queried so the banner
+    /// disappears immediately after the user clicks Import & Save.
+    private func hasUnmanagedBlockInToml() -> Bool {
+        let url = SettingsConfigPath.aerospaceTomlUrl()
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        return TomlMarkerWriter.hasUnmanagedBindingSection(in: raw)
+    }
+
+    /// Pull every shortcut from the user's raw `[mode.main.binding]` table
+    /// into the draft list, then strip the section from the TOML so the next
+    /// Save can write a clean marker block. We strip *before* Save (not as
+    /// part of writeBlock) so an aborted import leaves the TOML intact.
+    private func importFromConfig() {
+        let url = SettingsConfigPath.aerospaceTomlUrl()
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else {
+            saveStatus = "Error: couldn't read \(url.path)"
+            return
+        }
+        let extracted = TomlMarkerWriter.extractBindingSection(from: raw)
+        if extracted.isEmpty {
+            saveStatus = "No bindings found in [mode.main.binding] — nothing to import."
+            return
+        }
+        // Drop the original section now so the "duplicate" banner clears, but
+        // KEEP the AEROSPACE-UI markers and everything else.
+        let stripped = TomlMarkerWriter.stripBindingSection(from: raw)
+        do {
+            try stripped.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            saveStatus = "Error stripping original section: \(error)"
+            return
+        }
+        // Append imported rules to the existing draft (deduped by shortcut so
+        // a re-import doesn't double up).
+        var existing = draft ?? []
+        let existingShortcuts = Set(existing.map(\.shortcut))
+        for (shortcut, action) in extracted where !existingShortcuts.contains(shortcut) {
+            existing.append(KeybindingRule(shortcut: shortcut, action: action))
+        }
+        draft = existing
+        dirty = true
+        saveStatus = "Imported \(extracted.count) binding\(extracted.count == 1 ? "" : "s") — click Save to write the marker block."
     }
 }
 
