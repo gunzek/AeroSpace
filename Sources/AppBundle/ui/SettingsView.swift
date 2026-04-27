@@ -410,12 +410,13 @@ private struct WindowMatcherList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Window-specific overrides (first match wins, by case-insensitive substring of window title)")
+            Text("Per-window slots. Leave \u{201C}title contains\u{201D} empty to claim the next free slot regardless of order — the first window of this app to arrive takes the first empty row, the second takes the second, and so on. Fill the title field only when you want a specific window (matched by case-insensitive substring) pinned somewhere.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             ForEach(Array(matchers.enumerated()), id: \.element.id) { idx, _ in
                 HStack(spacing: 8) {
-                    TextField("title contains…", text: Binding(
+                    TextField("title contains… (empty = any window)", text: Binding(
                         get: { matchers[idx].titleSubstring },
                         set: { matchers[idx].titleSubstring = $0 },
                     ))
@@ -458,7 +459,7 @@ private struct WindowMatcherList: View {
                 Button {
                     matchers.append(WindowMatcher())
                 } label: {
-                    Label("Add window rule", systemImage: "plus.circle")
+                    Label("Add window slot", systemImage: "plus.circle")
                         .font(.caption)
                 }
                 .buttonStyle(.bordered)

@@ -79,6 +79,11 @@ final class MacWindow: Window {
         if MacWindow.allWindowsMap.removeValue(forKey: windowId) == nil {
             return
         }
+        // Personal-fork: free the slot this window claimed (if any) so the
+        // next window of the same app can take it. Without this, closing the
+        // 1st Safari window would leave its left-half claim "stuck" and the
+        // next Safari window would skip to the right half.
+        forgetMatcherAssignment(for: windowId)
         if !skipClosedWindowsCache { cacheClosedWindowIfNeeded() }
         let parent = unbindFromParent().parent
         let deadWindowWorkspace = parent.nodeWorkspace

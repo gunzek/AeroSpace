@@ -12,6 +12,19 @@ import Common
 /// state and on whether a sibling already exists. A direct tree mutation is
 /// shorter, idempotent, and keeps the slot logic in one Swift file instead
 /// of three (CmdKind + CmdArgs + Command + manifest plumbing).
+/// Maps `MacWindow.windowId` → matcher id. Once a matcher claims a window,
+/// the assignment persists across refreshes so that closing a different
+/// window doesn't yank this one to a new slot. Cleared on window destroy
+/// (the upstream `garbageCollect` path) — see SlotPlacement.swift's
+/// `forgetMatcherAssignment(for:)` below.
+@MainActor
+private var matcherAssignmentByWindow: [UInt32: UUID] = [:]
+
+@MainActor
+func forgetMatcherAssignment(for windowId: UInt32) {
+    matcherAssignmentByWindow.removeValue(forKey: windowId)
+}
+
 @MainActor
 func applySlotPlacement(_ window: Window) async {
     guard let appId = window.app.rawAppBundleId else { return }
@@ -19,18 +32,61 @@ func applySlotPlacement(_ window: Window) async {
     guard let rule = state.appRouting.first(where: { $0.appId == appId }) else { return }
     guard rule.layout != .floating else { return }
 
-    // Resolve effective workspace + slot via window-title matchers. First
-    // active matcher (non-empty substring) whose case-insensitive substring
-    // appears in the window title wins. Falls back to rule defaults.
+    // Two-pass matcher resolution:
+    //   1. Title-based matchers (non-empty substring) match by case-insensitive
+    //      window-title contains.
+    //   2. Title-agnostic matchers (empty substring) are claim-once: the first
+    //      one not yet assigned to another window of this app wins, and the
+    //      assignment sticks until the window is destroyed. This is what lets
+    //      a user say "I want 2 Safari windows side-by-side, don't care which
+    //      arrives first" — AeroSpace just feeds incoming windows into the
+    //      next free slot.
     let title = ((try? await window.title) ?? "").lowercased()
     var effectiveWorkspace = rule.workspace
     var effectiveSlot = rule.slot
+    var hit: WindowMatcher? = nil
+
+    // Pass 1: title-based matches
     for matcher in rule.windowMatchers {
         let needle = matcher.titleSubstring.trimmingCharacters(in: .whitespaces).lowercased()
         guard !needle.isEmpty, title.contains(needle) else { continue }
-        if let ws = matcher.workspaceOverride, !ws.isEmpty { effectiveWorkspace = ws }
-        if let s = matcher.slotOverride { effectiveSlot = s }
+        hit = matcher
         break
+    }
+
+    // Pass 2: title-agnostic claim-once
+    if hit == nil {
+        let titleAgnostic = rule.windowMatchers.filter { $0.titleSubstring.trimmingCharacters(in: .whitespaces).isEmpty }
+        if !titleAgnostic.isEmpty {
+            // If this window already claimed a matcher, keep it stable.
+            if let priorId = matcherAssignmentByWindow[window.windowId],
+               let prior = titleAgnostic.first(where: { $0.id == priorId })
+            {
+                hit = prior
+            } else {
+                // Otherwise find the first matcher not currently claimed by
+                // another live window of THIS app. We scope by app so two
+                // different routed apps with the same matcher count don't
+                // poach each other's slots.
+                let liveWindowIdsForApp = Set(MacWindow.allWindows
+                    .filter { $0.app.rawAppBundleId == appId }
+                    .map(\.windowId))
+                let claimedByOthers: Set<UUID> = Set(
+                    matcherAssignmentByWindow
+                        .filter { liveWindowIdsForApp.contains($0.key) && $0.key != window.windowId }
+                        .map(\.value),
+                )
+                if let firstFree = titleAgnostic.first(where: { !claimedByOthers.contains($0.id) }) {
+                    matcherAssignmentByWindow[window.windowId] = firstFree.id
+                    hit = firstFree
+                }
+            }
+        }
+    }
+
+    if let m = hit {
+        if let ws = m.workspaceOverride, !ws.isEmpty { effectiveWorkspace = ws }
+        if let s = m.slotOverride { effectiveSlot = s }
     }
 
     // If matcher overrode the workspace and we're not already there, move first.
