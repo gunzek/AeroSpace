@@ -16,42 +16,41 @@ import Foundation
 /// startup, not "switch me to this one".
 @MainActor
 func launchHomepage(_ state: UIState) async {
-    // First, snap any *already-open* routed apps to their target workspace.
-    // openApplication on an already-running app is a no-op — without this
-    // step Honza's report ("vypnuté apps se po Homepage loadly do správného
-    // workspace zatímco otevřené zůstaly kde jsou") would still hold.
+    print("🏠 LaunchHomepage: start, \(state.appRouting.count) rule(s)")
+    // First, snap any *already-open* routed apps to their target workspace
+    // (openApplication on an already-running app is a no-op).
     await reapplyRoutingAndSlotsToAllWindows()
 
-    let toLaunch: [(URL, String)] = state.appRouting.compactMap { rule in
-        guard let path = rule.appPath, FileManager.default.fileExists(atPath: path) else { return nil }
-        return (URL(fileURLWithPath: path), rule.displayName)
-    }
-    if toLaunch.isEmpty { return }
-
-    // Sequential launch with a 250 ms gap. The original parallel TaskGroup turned
-    // out to be a foot-gun: 7 apps appearing within ~50 ms means
-    // `on-window-detected` + slot-placement run for all of them at once on the
-    // MainActor, which serializes the work but stacks up tree mutations into
-    // one huge frame and was crashing AeroSpace mid-launch in Honza's setup.
-    // Stagger lets each window settle (move-to-workspace + slot placement) before
-    // the next app's window arrives. 250 ms is long enough for AeroSpace to
-    // finish a refreshSession and short enough to feel snappy for ~10 apps.
-    for (url, name) in toLaunch {
+    // Per-app sequence: open → wait → spawn extras for THIS app → next.
+    // Doing the spawn pass per-app instead of after all apps finished is
+    // what fixes the "Spawn missing works, Launch Homepage doesn't" gap:
+    // when ensureExtra runs immediately after a single openApplication,
+    // the just-launched app is the freshest activation and macOS routes
+    // ⌘N to it cleanly. With the previous all-then-ensure shape, by the
+    // time we got to the spawn pass some other freshly-opened app had
+    // grabbed focus and ⌘N landed on the wrong target.
+    for rule in state.appRouting {
+        guard let path = rule.appPath, FileManager.default.fileExists(atPath: path) else {
+            print("🏠 LaunchHomepage: skip \(rule.displayName) — no appPath or file missing")
+            continue
+        }
+        let url = URL(fileURLWithPath: path)
         let config = NSWorkspace.OpenConfiguration()
         config.activates = false
+        print("🏠 LaunchHomepage: open \(rule.displayName) (\(rule.appId))")
         do {
             _ = try await NSWorkspace.shared.openApplication(at: url, configuration: config)
         } catch {
-            print("Launch Homepage: failed to open \(name) at \(url.path): \(error)")
+            print("🏠 LaunchHomepage: failed to open \(rule.displayName): \(error)")
+            continue
         }
-        try? await Task.sleep(nanoseconds: 250_000_000)
+        // Long enough that the just-launched app's first window registered
+        // in MacWindow.allWindowsMap before ensureExtra reads currentCount.
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        await ensureExtraWindowsViaCmdN(rule: rule)
+        // Small breath between apps so the next openApplication doesn't
+        // immediately steal focus from a window we just spawned.
+        try? await Task.sleep(nanoseconds: 200_000_000)
     }
-
-    // After all the apps have had a moment to start, top up window counts so
-    // rules with multiple slots end up with that many windows. 2 seconds is
-    // pessimistic but reliable — Electron and Safari both take ~1 s before
-    // their initial window is registered, and the ensureExtra retry loop
-    // depends on currentCount being accurate.
-    try? await Task.sleep(nanoseconds: 2_000_000_000)
-    await ensureExtraWindowsForAllRoutedApps()
+    print("🏠 LaunchHomepage: done")
 }
