@@ -261,10 +261,11 @@ private struct AppRoutingSection: View {
                 if let token: RunSessionGuard = .isServerEnabled {
                     try await runLightSession(.menuBarButton, token) {
                         _ = try await reloadConfig()
-                        // Phase 3.6 follow-up: snap currently-open windows to any new slot
-                        // assignments. Without this, slot edits would only take effect for
-                        // windows opened after Save, not the ones already on screen.
-                        reapplySlotPlacementForAllWindows()
+                        // Phase 3.6 follow-up: snap currently-open windows to the new
+                        // routing rules (move to target workspace) AND any new slot
+                        // assignments. Without this, Save would only affect *future*
+                        // windows — already-open apps would stay where they are.
+                        reapplyRoutingAndSlotsToAllWindows()
                     }
                 }
                 saveStatus = .saved

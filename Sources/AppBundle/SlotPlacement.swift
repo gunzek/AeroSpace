@@ -35,15 +35,36 @@ func applySlotPlacement(_ window: Window) {
     placeWindowInSlot(window, slot: rule.slot, workspace: workspace)
 }
 
-/// 3.6 follow-up: walk every currently-known window and re-apply the slot
-/// constraint defined by its routing rule. Called after a Settings UI Save so
-/// existing windows snap to the layout the user just edited (the upstream
-/// on-window-detected hook only fires for *new* windows).
+/// 3.6 follow-up (extended): walk every currently-known window and apply both
+/// the routing (move to the rule's target workspace) AND the slot placement.
+/// Called after a Settings UI Save so existing windows snap to the layout the
+/// user just edited — the upstream `[[on-window-detected]]` hook only fires
+/// for *new* windows, so without this Save would have no effect on already-
+/// open apps and the user would have to close+reopen each one.
 @MainActor
-func reapplySlotPlacementForAllWindows() {
+func reapplyRoutingAndSlotsToAllWindows() {
     let state = UISettingsStore.shared.state
-    if state.appRouting.allSatisfy({ $0.slot == .full }) { return }
+    if state.appRouting.isEmpty { return }
     for window in MacWindow.allWindows {
+        guard let appId = window.app.rawAppBundleId else { continue }
+        guard let rule = state.appRouting.first(where: { $0.appId == appId }) else { continue }
+
+        // 1. Move to the routed workspace if not already there.
+        if let currentWorkspace = window.nodeWorkspace, currentWorkspace.name != rule.workspace {
+            let targetWorkspace = Workspace.get(byName: rule.workspace)
+            window.unbindFromParent()
+            if rule.layout == .floating {
+                // Floating windows live directly under the workspace, not in
+                // the tiling container. Re-binding into rootTilingContainer
+                // would silently start tiling them.
+                window.bind(to: targetWorkspace, adaptiveWeight: WEIGHT_AUTO, index: INDEX_BIND_LAST)
+            } else {
+                window.bind(to: targetWorkspace.rootTilingContainer, adaptiveWeight: WEIGHT_AUTO, index: INDEX_BIND_LAST)
+            }
+        }
+
+        // 2. Apply slot placement (no-op for .full or for floating apps; the
+        //    guards inside applySlotPlacement handle both).
         applySlotPlacement(window)
     }
 }
