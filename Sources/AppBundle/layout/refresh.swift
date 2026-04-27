@@ -187,18 +187,37 @@ private func layoutWorkspaces() async throws {
         monitorToOptimalHideCorner[monitor.rect.topLeftCorner] = corner
     }
 
-    // to reduce flicker, first unhide visible workspaces, then hide invisible ones
+    // Personal-fork tweak: stash non-visible-workspace windows via per-window
+    // minimize (cmd+M / kAXMinimizedAttribute) instead of upstream's off-screen
+    // sliver. macOS 26 clamps off-screen positions so window corners stay
+    // visible; minimize is the only public API that genuinely removes a
+    // window from the screen on a per-window basis. Trade-off: minimized
+    // windows show as thumbnails in the Dock (one per window) — reducible
+    // via `defaults write com.apple.dock minimize-to-application -bool true`
+    // (folds them into the app icon) and `mineffect = scale` (faster anim).
+    //
+    // Order matters: unminimize-then-layout for visible, minimize for the rest.
+    // unhideFromCorner is still called as a no-op safety net for any window
+    // that an older build may have left positioned off-screen.
     for monitor in monitors {
         let workspace = monitor.activeWorkspace
-        workspace.allLeafWindowsRecursive.forEach { ($0 as! MacWindow).unhideFromCorner() } // todo as!
+        for window in workspace.allLeafWindowsRecursive {
+            let mw = window as! MacWindow // todo as!
+            mw.setNativeMinimized(false)
+            mw.unhideFromCorner()
+        }
         try await workspace.layoutWorkspace()
     }
     for workspace in Workspace.all where !workspace.isVisible {
-        let corner = monitorToOptimalHideCorner[workspace.workspaceMonitor.rect.topLeftCorner] ?? .bottomRightCorner
         for window in workspace.allLeafWindowsRecursive {
-            try await (window as! MacWindow).hideInCorner(corner) // todo as!
+            (window as! MacWindow).setNativeMinimized(true) // todo as!
         }
     }
+    // monitorToOptimalHideCorner is no longer used in the personal fork;
+    // kept above only because the corner-pick logic is hardish to remove
+    // without rippling into other places. Reference here to silence
+    // "never used" warnings without wider refactor.
+    _ = monitorToOptimalHideCorner
 }
 
 @MainActor

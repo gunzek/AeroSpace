@@ -776,6 +776,7 @@ private struct GapSlider: View {
 
 private struct TweaksSection: View {
     @State private var resizeSpedUp = SystemTweaks.isResizeSpedUp()
+    @State private var instantMinimize = SystemTweaks.isInstantMinimizeOn()
 
     var body: some View {
         SettingsScaffold(title: "Tweaks") {
@@ -793,6 +794,24 @@ private struct TweaksSection: View {
                     ))
                     .toggleStyle(.switch)
                     Text("Sets `NSWindowResizeTime` to \(String(format: "%.3f", SystemTweaks.fastResize)) s. macOS default is ~0.2 s, which dominates the perceived latency when AeroSpace re-tiles a workspace. Most apps pick the new value up immediately; some need a relaunch.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(8)
+            }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Instant minimize (no Genie animation, no Dock thumbnails)", isOn: Binding(
+                        get: { instantMinimize },
+                        set: { newValue in
+                            _ = SystemTweaks.setInstantMinimize(newValue)
+                            instantMinimize = SystemTweaks.isInstantMinimizeOn()
+                        },
+                    ))
+                    .toggleStyle(.switch)
+                    Text("Sets `mineffect = scale` and `minimize-to-application = true`. AeroSpace stashes windows on non-visible workspaces by minimizing them, and macOS's default Genie effect plus per-window Dock thumbnails make that visible and slow. With this on, minimize uses the fast scale effect and folds into the app icon — no Dock clutter. Killalls Dock to apply.")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
