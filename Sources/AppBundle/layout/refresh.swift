@@ -187,18 +187,16 @@ private func layoutWorkspaces() async throws {
         monitorToOptimalHideCorner[monitor.rect.topLeftCorner] = corner
     }
 
-    // to reduce flicker, first unhide visible workspaces, then hide invisible ones
-    for monitor in monitors {
-        let workspace = monitor.activeWorkspace
-        workspace.allLeafWindowsRecursive.forEach { ($0 as! MacWindow).unhideFromCorner() } // todo as!
-        try await workspace.layoutWorkspace()
-    }
-
-    // Personal-fork tweak: prefer macOS-native app-level hide (the same thing
-    // ⌘H does) for any app whose every window lives on a non-visible workspace.
-    // Upstream's hideInCorner still runs for the rest, but a fully-stashed app
-    // is now genuinely invisible (Dock icon dims, no off-screen sliver) instead
-    // of leaving a window corner peeking out — Honza's exact complaint.
+    // Personal-fork tweak: prefer macOS-native app-level hide (⌘H equivalent)
+    // for any app whose every window lives on a non-visible workspace.
+    //
+    // CRUCIAL: this pre-pass MUST run before the visible workspace's layout,
+    // not after. setAxFrame on a hidden window is a no-op, so if we app-hide
+    // an app first and then try to layout the workspace it just became visible
+    // on, the windows stay at their previous (= last-laid-out-when-visible)
+    // position; switching W → E → W → E without a pre-layout unhide produced
+    // "all 3 stacked on top of each other on E" because AeroSpace tried to
+    // setAxFrame on the still-hidden Superhuman/WhatsApp/Messages.
     let visibleWorkspaceNames: Set<String> = Set(monitors.map { $0.activeWorkspace.name })
     var windowsByApp: [pid_t: [MacWindow]] = [:]
     for window in MacWindow.allWindows {
@@ -216,6 +214,13 @@ private func layoutWorkspaces() async throws {
         } else if macApp.nsApp.isHidden {
             macApp.nsApp.unhide()
         }
+    }
+
+    // to reduce flicker, first unhide visible workspaces, then hide invisible ones
+    for monitor in monitors {
+        let workspace = monitor.activeWorkspace
+        workspace.allLeafWindowsRecursive.forEach { ($0 as! MacWindow).unhideFromCorner() } // todo as!
+        try await workspace.layoutWorkspace()
     }
 
     for workspace in Workspace.all where !workspace.isVisible {
