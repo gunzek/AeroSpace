@@ -6,13 +6,17 @@ import PrivateApi
 func checkAccessibilityPermissions() {
     let options = [axTrustedCheckOptionPrompt: true]
     if !AXIsProcessTrustedWithOptions(options as CFDictionary) {
-        resetAccessibility() // Because macOS doesn't reset it for us when the app signature changes...
+        // Personal-fork tweak: upstream calls `tccutil reset Accessibility
+        // bobko.aerospace` here so the user has to grant from scratch (the
+        // existing TCC entry is invalidated by a code-signing hash change).
+        // For an iteratively rebuilt fork that's painful — every install
+        // wipes the entry and Honza has to add /Applications/AeroSpace.app
+        // back manually. We skip the reset; the user can just toggle off+on
+        // in System Settings → Privacy & Security → Accessibility, which
+        // re-evaluates against the new binary hash. Quitting still happens
+        // because AeroSpace needs the permission to do anything useful.
         terminateApp()
     }
-}
-
-private func resetAccessibility() {
-    _ = try? Process.run(URL(filePath: "/usr/bin/tccutil"), arguments: ["reset", "Accessibility", aeroSpaceAppId])
 }
 
 protocol ReadableAttr: Sendable {
