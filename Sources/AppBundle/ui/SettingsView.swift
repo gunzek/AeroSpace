@@ -671,7 +671,7 @@ private struct KeybindingsSection: View {
                 }
                 dirty = false
                 saveStatus = "Saved"
-            } catch let TomlMarkerWriter.WriteError.duplicateBindingSection {
+            } catch TomlMarkerWriter.WriteError.duplicateBindingSection {
                 saveStatus = "Error: remove the existing [mode.main.binding] table from ~/.aerospace.toml before enabling UI-managed keybindings."
             } catch let TomlMarkerWriter.WriteError.unsafeLiteral(field, value) {
                 saveStatus = "Error: \(field) contains an unsafe character ('\(value)'). Single quotes are not allowed."
@@ -972,7 +972,7 @@ private struct GapsSection: View {
                     try await runLightSession(.menuBarButton, token) { _ = try await reloadConfig() }
                 }
                 saveStatus = "Saved"
-            } catch let TomlMarkerWriter.WriteError.duplicateGapsSection {
+            } catch TomlMarkerWriter.WriteError.duplicateGapsSection {
                 saveStatus = "Error: remove the existing [gaps] block from ~/.aerospace.toml before enabling UI-managed gaps."
             } catch {
                 saveStatus = "Error: \(error)"
@@ -1021,7 +1021,7 @@ private struct TweaksSection: View {
                         },
                     ))
                     .toggleStyle(.switch)
-                    Text("Sets `NSWindowResizeTime` to \(String(format: "%.3f", SystemTweaks.fastResize)) s. macOS default is ~0.2 s, which dominates the perceived latency when AeroSpace re-tiles a workspace. Most apps pick the new value up immediately; some need a relaunch.")
+                    Text("Sets `NSWindowResizeTime` to ~0.001 s. macOS default is ~0.2 s, which dominates the perceived latency when AeroSpace re-tiles a workspace. Most apps pick the new value up immediately; some need a relaunch.")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
