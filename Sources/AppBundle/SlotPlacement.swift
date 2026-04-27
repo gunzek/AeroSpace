@@ -52,7 +52,9 @@ func reapplyRoutingAndSlotsToAllWindows() {
         // 1. Move to the routed workspace if not already there.
         if let currentWorkspace = window.nodeWorkspace, currentWorkspace.name != rule.workspace {
             let targetWorkspace = Workspace.get(byName: rule.workspace)
-            window.unbindFromParent()
+            // unbindFromParent asserts on already-unbound — guard the same way
+            // place() does, so a stale/duplicate iteration can't take us down.
+            if window.parent != nil { window.unbindFromParent() }
             if rule.layout == .floating {
                 // Floating windows live directly under the workspace, not in
                 // the tiling container. Re-binding into rootTilingContainer
@@ -89,9 +91,11 @@ private func placeWindowInSlot(_ window: Window, slot: Slot, workspace: Workspac
             ensureOrientation(root, .h)
             let columnIndex   = (slot == .topLeft || slot == .bottomLeft) ? 0 : 1
             let verticalIndex = (slot == .topLeft || slot == .topRight)   ? 0 : 1
-            // First, get this window out of the root so it doesn't accidentally
-            // end up as the "occupant" we then try to re-home into the column —
-            // that would be a self-rebind loop.
+            // If our window is already a child of root at the column we want,
+            // ensureSubColumn would pick it up as the "occupant" and try to
+            // re-home self into the new column — a self-rebind loop. Pull it
+            // out first. The subsequent place() call is idempotent and will
+            // re-bind it correctly inside the column.
             if window.parent === root { window.unbindFromParent() }
             guard let column = ensureSubColumn(in: root, atIndex: columnIndex, orientation: .v) else { return }
             place(window, in: column, atIndex: verticalIndex)
@@ -108,14 +112,19 @@ private func ensureOrientation(_ container: TilingContainer, _ orientation: Orie
 }
 
 /// Idempotent insert: if the window already sits at the right slot, do nothing.
-/// Otherwise unbind from current parent and rebind at the target index. The
-/// child currently at that index gets shifted by one (`Array.insert(at:)`
-/// behaviour in TreeNode.bind).
+/// Otherwise rebind at the target index. Two crash conditions guarded here:
+///  1. `unbindFromParent` asserts the node IS bound — quadrant placement
+///     pre-unbinds, so we check `window.parent != nil` before unbinding.
+///  2. `Array.insert(at: i)` traps when `i > count`. A fresh sub-container has
+///     0 children; binding at slot index 1 (bottom) would crash. Clamp.
 @MainActor
 private func place(_ window: Window, in parent: TilingContainer, atIndex targetIndex: Int) {
     if window.parent === parent, window.ownIndex == targetIndex { return }
-    window.unbindFromParent()
-    window.bind(to: parent, adaptiveWeight: WEIGHT_AUTO, index: targetIndex)
+    if window.parent != nil {
+        window.unbindFromParent()
+    }
+    let safeIndex = min(targetIndex, parent.children.count)
+    window.bind(to: parent, adaptiveWeight: WEIGHT_AUTO, index: safeIndex)
 }
 
 /// Returns a TilingContainer at `parent.children[index]` with the requested
@@ -151,9 +160,10 @@ private func ensureSubColumn(
         .tiles,
         index: safeIndex,
     )
-    // Only re-home the occupant if it's a Window — moving a TilingContainer would
-    // be a recursive nest that can blow the layout tree's depth invariants.
-    if let occupant, occupant is Window {
+    // Only re-home the occupant if it's a Window AND still bound — moving a
+    // TilingContainer would be a recursive nest, and unbinding an already-
+    // unbound node would crash AeroSpace's assertion in unbindIfBound.
+    if let occupant, occupant is Window, occupant.parent != nil {
         occupant.unbindFromParent()
         occupant.bind(to: column, adaptiveWeight: WEIGHT_AUTO, index: 0)
     }
