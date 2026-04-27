@@ -410,21 +410,17 @@ private struct WindowMatcherList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Per-window slots. Leave \u{201C}title contains\u{201D} empty to claim the next free slot regardless of order — the first window of this app to arrive takes the first empty row, the second takes the second, and so on. Fill the title field only when you want a specific window (matched by case-insensitive substring) pinned somewhere.")
+            Text("Window slots — first window of this app to open takes slot 1, second takes slot 2, and so on. Order in this list = order of priority. Closing a window frees its slot for the next one to arrive.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(Array(matchers.enumerated()), id: \.element.id) { idx, _ in
                 HStack(spacing: 8) {
-                    TextField("title contains… (empty = any window)", text: Binding(
-                        get: { matchers[idx].titleSubstring },
-                        set: { matchers[idx].titleSubstring = $0 },
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 180)
-                    Text("→")
+                    Text("Slot \(idx + 1)")
+                        .font(.caption)
                         .foregroundStyle(.tertiary)
-                    TextField("workspace", text: Binding(
+                        .frame(width: 50, alignment: .leading)
+                    TextField("workspace (blank = same as rule)", text: Binding(
                         get: { matchers[idx].workspaceOverride ?? "" },
                         set: { newValue in
                             let cleaned = newValue.uppercased()
@@ -432,7 +428,7 @@ private struct WindowMatcherList: View {
                         },
                     ))
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 72)
+                    .frame(width: 90)
                     Picker("", selection: Binding<Slot?>(
                         get: { matchers[idx].slotOverride },
                         set: { matchers[idx].slotOverride = $0 },
@@ -457,6 +453,9 @@ private struct WindowMatcherList: View {
             }
             HStack {
                 Button {
+                    // New slots are title-agnostic by default — that's the
+                    // "claim-on-arrival" mode. The titleSubstring field is
+                    // intentionally not surfaced in the UI for now.
                     matchers.append(WindowMatcher())
                 } label: {
                     Label("Add window slot", systemImage: "plus.circle")
