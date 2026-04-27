@@ -22,20 +22,22 @@ func launchHomepage(_ state: UIState) async {
     }
     if toLaunch.isEmpty { return }
 
-    await withTaskGroup(of: Void.self) { group in
-        for (url, name) in toLaunch {
-            group.addTask {
-                // Construct the config inside the task so we don't smuggle a
-                // shared NSWorkspace.OpenConfiguration across the MainActor boundary
-                // (which Swift 6 strict concurrency rejects as a sending hazard).
-                let config = NSWorkspace.OpenConfiguration()
-                config.activates = false
-                do {
-                    _ = try await NSWorkspace.shared.openApplication(at: url, configuration: config)
-                } catch {
-                    print("Launch Homepage: failed to open \(name) at \(url.path): \(error)")
-                }
-            }
+    // Sequential launch with a 250 ms gap. The original parallel TaskGroup turned
+    // out to be a foot-gun: 7 apps appearing within ~50 ms means
+    // `on-window-detected` + slot-placement run for all of them at once on the
+    // MainActor, which serializes the work but stacks up tree mutations into
+    // one huge frame and was crashing AeroSpace mid-launch in Honza's setup.
+    // Stagger lets each window settle (move-to-workspace + slot placement) before
+    // the next app's window arrives. 250 ms is long enough for AeroSpace to
+    // finish a refreshSession and short enough to feel snappy for ~10 apps.
+    for (url, name) in toLaunch {
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = false
+        do {
+            _ = try await NSWorkspace.shared.openApplication(at: url, configuration: config)
+        } catch {
+            print("Launch Homepage: failed to open \(name) at \(url.path): \(error)")
         }
+        try? await Task.sleep(nanoseconds: 250_000_000)
     }
 }

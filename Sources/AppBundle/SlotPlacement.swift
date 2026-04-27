@@ -18,11 +18,19 @@ func applySlotPlacement(_ window: Window) {
     let state = UISettingsStore.shared.state
     guard let rule = state.appRouting.first(where: { $0.appId == appId }) else { return }
     guard rule.slot != .full else { return }
+    // Floating apps don't live in the tiling tree at all — forcing one into a
+    // TilingContainer slot is a semantic contradiction and was crashing AeroSpace
+    // mid-Launch-Homepage. Skip cleanly.
+    guard rule.layout != .floating else { return }
     guard let workspace = window.nodeWorkspace else { return }
     // Only place if the window actually landed on the rule's intended workspace —
     // otherwise the user moved it manually or the rule is stale and we should
     // not second-guess them.
     guard workspace.name == rule.workspace else { return }
+    // Defense in depth: window must currently be parented to a TilingContainer.
+    // Floating/popup/dialog windows have other parents (Workspace,
+    // MacosPopupWindowsContainer, …) and our placement code assumes tiling.
+    guard window.parent is TilingContainer else { return }
 
     placeWindowInSlot(window, slot: rule.slot, workspace: workspace)
 }
@@ -60,7 +68,11 @@ private func placeWindowInSlot(_ window: Window, slot: Slot, workspace: Workspac
             ensureOrientation(root, .h)
             let columnIndex   = (slot == .topLeft || slot == .bottomLeft) ? 0 : 1
             let verticalIndex = (slot == .topLeft || slot == .topRight)   ? 0 : 1
-            let column = ensureSubColumn(in: root, atIndex: columnIndex, orientation: .v)
+            // First, get this window out of the root so it doesn't accidentally
+            // end up as the "occupant" we then try to re-home into the column —
+            // that would be a self-rebind loop.
+            if window.parent === root { window.unbindFromParent() }
+            guard let column = ensureSubColumn(in: root, atIndex: columnIndex, orientation: .v) else { return }
             place(window, in: column, atIndex: verticalIndex)
     }
 }
@@ -96,26 +108,31 @@ private func ensureSubColumn(
     in parent: TilingContainer,
     atIndex index: Int,
     orientation: Orientation,
-) -> TilingContainer {
+) -> TilingContainer? {
     if index < parent.children.count, let existing = parent.children[index] as? TilingContainer {
         if existing.orientation != orientation {
             existing.changeOrientation(orientation)
         }
         return existing
     }
-    // Nothing or a bare window at this index — wrap.
-    let occupant = (index < parent.children.count) ? parent.children[index] : nil
+    // Defense: the index we want to bind a new container at must be reachable.
+    // bind() with index = parent.children.count appends; index > count would
+    // be undefined behavior. If we somehow get there, bail rather than crash.
+    let safeIndex = min(index, parent.children.count)
+    // Nothing or a bare window at this position — wrap. Capture the occupant
+    // (if any) BEFORE creating the new container, since binding the new
+    // container shifts everything at safeIndex by one.
+    let occupant = (safeIndex < parent.children.count) ? parent.children[safeIndex] : nil
     let column = TilingContainer(
         parent: parent,
         adaptiveWeight: WEIGHT_AUTO,
         orientation,
         .tiles,
-        index: index,
+        index: safeIndex,
     )
-    if let occupant {
-        // bind() above inserted the new column at `index`, shifting the bare
-        // window to index+1. Move that window into the new column so the slot
-        // grid stays consistent (we don't want orphan windows at the root).
+    // Only re-home the occupant if it's a Window — moving a TilingContainer would
+    // be a recursive nest that can blow the layout tree's depth invariants.
+    if let occupant, occupant is Window {
         occupant.unbindFromParent()
         occupant.bind(to: column, adaptiveWeight: WEIGHT_AUTO, index: 0)
     }
