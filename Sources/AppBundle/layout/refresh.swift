@@ -193,39 +193,9 @@ private func layoutWorkspaces() async throws {
         workspace.allLeafWindowsRecursive.forEach { ($0 as! MacWindow).unhideFromCorner() } // todo as!
         try await workspace.layoutWorkspace()
     }
-
-    // Personal-fork tweak: prefer macOS-native app-level hide (the same thing
-    // ⌘H does) for any app whose every window lives on a non-visible workspace.
-    // Upstream's hideInCorner still runs for the rest, but a fully-stashed app
-    // is now genuinely invisible (Dock icon dims, no off-screen sliver) instead
-    // of leaving a window corner peeking out — Honza's exact complaint.
-    let visibleWorkspaceNames: Set<String> = Set(monitors.map { $0.activeWorkspace.name })
-    var windowsByApp: [pid_t: [MacWindow]] = [:]
-    for window in MacWindow.allWindows {
-        windowsByApp[window.macApp.pid, default: []].append(window)
-    }
-    var hiddenAppPids: Set<pid_t> = []
-    for (_, windows) in windowsByApp {
-        guard let macApp = windows.first?.macApp else { continue }
-        let hasVisibleWindow = windows.contains { window in
-            (window.nodeWorkspace?.name).flatMap { visibleWorkspaceNames.contains($0) } ?? false
-        }
-        if !hasVisibleWindow {
-            hiddenAppPids.insert(macApp.pid)
-            if !macApp.nsApp.isHidden { macApp.nsApp.hide() }
-        } else if macApp.nsApp.isHidden {
-            macApp.nsApp.unhide()
-        }
-    }
-
     for workspace in Workspace.all where !workspace.isVisible {
         let corner = monitorToOptimalHideCorner[workspace.workspaceMonitor.rect.topLeftCorner] ?? .bottomRightCorner
         for window in workspace.allLeafWindowsRecursive {
-            // Skip the off-screen sliver trick for apps we just app-hid; the
-            // app is gone from the screen entirely, so positioning its windows
-            // is wasted AX traffic and sometimes argues with macOS's own
-            // "remember last position" logic when the app is later unhidden.
-            if hiddenAppPids.contains((window as! MacWindow).macApp.pid) { continue }
             try await (window as! MacWindow).hideInCorner(corner) // todo as!
         }
     }

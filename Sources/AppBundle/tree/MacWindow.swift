@@ -146,16 +146,7 @@ final class MacWindow: Window {
                 let onePixelOffset = macApp.appId == .zoom ? .zero : CGPoint(x: 1, y: 1)
                 p = nodeMonitor.visibleRect.bottomRightCorner - onePixelOffset
         }
-        // Personal-fork tweak: shrink the window to 1×1 on top of the off-screen
-        // move. macOS 26 refuses to fully push windows past the screen edge — it
-        // clamps so a sliver stays visible (Honza was seeing the corners of 5
-        // stashed apps in the bottom-left). Forcing the size to 1×1 means even
-        // when macOS clamps the position, only a 1-pixel speck is on-screen.
-        // Apps with a minSize constraint (often 200×200 in Cocoa) will end up
-        // at their minimum, still much smaller than before. layoutRecursive on
-        // workspace re-show resizes back automatically; we don't need to
-        // remember the old size here.
-        setAxFrame(p, CGSize(width: 1, height: 1))
+        setAxFrame(p, nil)
     }
 
     @MainActor
