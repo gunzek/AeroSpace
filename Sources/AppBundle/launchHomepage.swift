@@ -16,6 +16,12 @@ import Foundation
 /// startup, not "switch me to this one".
 @MainActor
 func launchHomepage(_ state: UIState) async {
+    // First, snap any *already-open* routed apps to their target workspace.
+    // openApplication on an already-running app is a no-op — without this
+    // step Honza's report ("vypnuté apps se po Homepage loadly do správného
+    // workspace zatímco otevřené zůstaly kde jsou") would still hold.
+    reapplyRoutingAndSlotsToAllWindows()
+
     let toLaunch: [(URL, String)] = state.appRouting.compactMap { rule in
         guard let path = rule.appPath, FileManager.default.fileExists(atPath: path) else { return nil }
         return (URL(fileURLWithPath: path), rule.displayName)

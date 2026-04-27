@@ -147,6 +147,9 @@ private struct AppRoutingSection: View {
             HStack {
                 statusLabel
                 Spacer()
+                Button("Apply to open windows") { applyNow() }
+                    .help("Move every currently-open app from your routing list to its assigned workspace and slot, without needing a Save first.")
+                    .disabled(store.state.appRouting.isEmpty)
                 Button("Discard") { resetDraft() }
                     .disabled(!saveStatus.isDirty)
                 Button("Save") { save() }
@@ -248,6 +251,25 @@ private struct AppRoutingSection: View {
         markDirty()
     }
 
+    private func applyNow() {
+        // Force-reapply current saved rules to live windows. Useful when
+        // users edit JSON directly or when Save is greyed-out (no dirty
+        // changes) but they still want existing windows to snap to layout.
+        saveStatus = .saving
+        Task { @MainActor in
+            if let token: RunSessionGuard = .isServerEnabled {
+                try? await runLightSession(.menuBarButton, token) {
+                    reapplyRoutingAndSlotsToAllWindows()
+                }
+            } else {
+                reapplyRoutingAndSlotsToAllWindows()
+            }
+            saveStatus = .saved
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if saveStatus == .saved { saveStatus = .clean }
+        }
+    }
+
     private func save() {
         let snapshot = draft
         saveStatus = .saving
@@ -300,7 +322,10 @@ private struct AppRoutingRow: View {
             }
             .frame(minWidth: 140, alignment: .leading)
             Spacer(minLength: 8)
-            TextField("workspace", text: $rule.workspace)
+            TextField("workspace", text: Binding(
+                get: { rule.workspace },
+                set: { rule.workspace = $0.uppercased() },
+            ))
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 72)
             Picker("", selection: $rule.slot) {
