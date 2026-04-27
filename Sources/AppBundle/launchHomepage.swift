@@ -48,8 +48,10 @@ func launchHomepage(_ state: UIState) async {
     }
 
     // After all the apps have had a moment to start, top up window counts so
-    // rules with multiple slots end up with that many windows. Done as a
-    // separate pass so we know currentCount is accurate per app.
-    try? await Task.sleep(nanoseconds: 800_000_000)
+    // rules with multiple slots end up with that many windows. 2 seconds is
+    // pessimistic but reliable — Electron and Safari both take ~1 s before
+    // their initial window is registered, and the ensureExtra retry loop
+    // depends on currentCount being accurate.
+    try? await Task.sleep(nanoseconds: 2_000_000_000)
     await ensureExtraWindowsForAllRoutedApps()
 }

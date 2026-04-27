@@ -17,44 +17,67 @@ import Foundation
 /// then waits a beat for macOS to take focus before posting the events.
 @MainActor
 func ensureExtraWindowsViaCmdN(rule: AppRoutingRule) async {
-    // Window matchers (any kind) define how many slots this app expects.
-    // No matchers → no spawning; the rule's default slot already covers
-    // the single-window case.
     let target = rule.windowMatchers.count
     guard target > 0 else { return }
 
-    let currentCount = MacWindow.allWindows.count { $0.app.rawAppBundleId == rule.appId }
-    let needed = target - currentCount
-    guard needed > 0 else { return }
+    // Retry up to 4 times. Each iteration: re-check window count, activate
+    // the app, sleep enough that activation actually lands, post a single
+    // ⌘N, sleep so the new window registers, loop. When Launch Homepage
+    // fires this right after a flurry of openApplication calls the focus
+    // can be racing — the single "activate once and post N events" version
+    // missed because some other just-launched app stole focus mid-loop.
+    // Per-iteration activate + verify-frontmost survives the race.
+    let maxAttempts = max(target, 1) + 3 // give a few retries above the bare minimum
+    var attempts = 0
+    while attempts < maxAttempts {
+        attempts += 1
+        let currentCount = MacWindow.allWindows.count { $0.app.rawAppBundleId == rule.appId }
+        let needed = target - currentCount
+        if needed <= 0 {
+            print("ensureExtraWindowsViaCmdN[\(rule.displayName)]: done at attempt \(attempts), have \(currentCount)/\(target)")
+            return
+        }
 
-    guard let runningApp = NSRunningApplication
-        .runningApplications(withBundleIdentifier: rule.appId)
-        .first
-    else { return }
+        guard let runningApp = NSRunningApplication
+            .runningApplications(withBundleIdentifier: rule.appId)
+            .first
+        else {
+            print("ensureExtraWindowsViaCmdN[\(rule.displayName)]: app not running, give up")
+            return
+        }
 
-    runningApp.activate()
-    // Give macOS a beat to actually shift focus before we post keystrokes.
-    // 300 ms feels conservative; some apps (Electron-based) need at least
-    // 200 ms to honour the ⌘N keystroke after activation.
-    try? await Task.sleep(nanoseconds: 300_000_000)
+        runningApp.activate()
+        // Long enough that macOS has actually shifted focus over.
+        try? await Task.sleep(nanoseconds: 600_000_000)
 
-    let source = CGEventSource(stateID: .hidSystemState)
-    let nKeyCode: CGKeyCode = 0x2D // ANSI virtual key for "N"
+        // Verify the right app is frontmost — if Launch Homepage still has
+        // another app activating in the background it can steal focus mid-
+        // sleep. If we're not on top, re-activate and wait once more.
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier != rule.appId {
+            runningApp.activate()
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
 
-    for _ in 0..<needed {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let nKeyCode: CGKeyCode = 0x2D
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: nKeyCode, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: nKeyCode, keyDown: false)
-        else { continue }
+        else {
+            print("ensureExtraWindowsViaCmdN[\(rule.displayName)]: failed to build CGEvent")
+            return
+        }
         down.flags = .maskCommand
         up.flags = .maskCommand
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
-        // Pause between repeats so each window fully registers (and gets a
-        // unique title) before the next ⌘N goes in. Without this, the second
-        // and third events can arrive while the first window is still mid-
-        // creation and get dropped or duplicated unpredictably.
-        try? await Task.sleep(nanoseconds: 350_000_000)
+        print("ensureExtraWindowsViaCmdN[\(rule.displayName)]: posted ⌘N (attempt \(attempts), need \(needed))")
+
+        // Wait for the new window to register before re-checking.
+        try? await Task.sleep(nanoseconds: 700_000_000)
     }
+
+    let finalCount = MacWindow.allWindows.count { $0.app.rawAppBundleId == rule.appId }
+    print("ensureExtraWindowsViaCmdN[\(rule.displayName)]: gave up after \(maxAttempts) attempts, have \(finalCount)/\(target)")
 }
 
 /// Walk every routing rule and ensure each routed app has at least as many
