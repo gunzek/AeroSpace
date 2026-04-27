@@ -259,10 +259,10 @@ private struct AppRoutingSection: View {
         Task { @MainActor in
             if let token: RunSessionGuard = .isServerEnabled {
                 try? await runLightSession(.menuBarButton, token) {
-                    reapplyRoutingAndSlotsToAllWindows()
+                    await reapplyRoutingAndSlotsToAllWindows()
                 }
             } else {
-                reapplyRoutingAndSlotsToAllWindows()
+                await reapplyRoutingAndSlotsToAllWindows()
             }
             saveStatus = .saved
             try? await Task.sleep(nanoseconds: 1_500_000_000)
@@ -287,7 +287,7 @@ private struct AppRoutingSection: View {
                         // routing rules (move to target workspace) AND any new slot
                         // assignments. Without this, Save would only affect *future*
                         // windows — already-open apps would stay where they are.
-                        reapplyRoutingAndSlotsToAllWindows()
+                        await reapplyRoutingAndSlotsToAllWindows()
                     }
                 }
                 saveStatus = .saved
@@ -304,54 +304,77 @@ private struct AppRoutingRow: View {
     @Binding var rule: AppRoutingRule
     let conflictsWith: [String]
     let onDelete: () -> Void
+    @State private var matchersExpanded = false
 
     private var hasConflict: Bool { !conflictsWith.isEmpty }
 
     var body: some View {
-        HStack(spacing: 12) {
-            appIcon
-                .frame(width: 24, height: 24)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(rule.displayName)
-                    .frame(minWidth: 100, alignment: .leading)
-                    .lineLimit(1)
-                Text(rule.appId)
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-            .frame(minWidth: 140, alignment: .leading)
-            Spacer(minLength: 8)
-            TextField("workspace", text: Binding(
-                get: { rule.workspace },
-                set: { rule.workspace = $0.uppercased() },
-            ))
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 72)
-            Picker("", selection: $rule.slot) {
-                ForEach(Slot.allCases) { slot in
-                    Text(slot.displayName).tag(slot)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 12) {
+                appIcon
+                    .frame(width: 24, height: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(rule.displayName)
+                        .frame(minWidth: 100, alignment: .leading)
+                        .lineLimit(1)
+                    Text(rule.appId)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
-            }
-            .pickerStyle(.menu)
-            .frame(width: 130)
-            Picker("", selection: $rule.layout) {
-                ForEach(AppLayout.allCases) { layout in
-                    Text(layout.displayName).tag(layout)
+                .frame(minWidth: 140, alignment: .leading)
+                Spacer(minLength: 8)
+                TextField("workspace", text: Binding(
+                    get: { rule.workspace },
+                    set: { rule.workspace = $0.uppercased() },
+                ))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 72)
+                Picker("", selection: $rule.slot) {
+                    ForEach(Slot.allCases) { slot in
+                        Text(slot.displayName).tag(slot)
+                    }
                 }
+                .pickerStyle(.menu)
+                .frame(width: 130)
+                Picker("", selection: $rule.layout) {
+                    ForEach(AppLayout.allCases) { layout in
+                        Text(layout.displayName).tag(layout)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 90)
+                if hasConflict {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .help("Slot overlaps with: " + conflictsWith.joined(separator: ", "))
+                }
+                Button {
+                    matchersExpanded.toggle()
+                } label: {
+                    HStack(spacing: 2) {
+                        Image(systemName: matchersExpanded ? "chevron.down.circle" : "chevron.right.circle")
+                        Text("\(rule.windowMatchers.count)")
+                            .font(.caption)
+                            .monospacedDigit()
+                    }
+                    .foregroundStyle(rule.windowMatchers.isEmpty ? Color.secondary : Color.accentColor)
+                }
+                .buttonStyle(.plain)
+                .help("Per-window overrides — match by window title to put separate windows of the same app on different workspaces or slots.")
+                Button(role: .destructive, action: onDelete) {
+                    Image(systemName: "minus.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
-            .pickerStyle(.menu)
-            .frame(width: 90)
-            if hasConflict {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                    .help("Slot overlaps with: " + conflictsWith.joined(separator: ", "))
+
+            if matchersExpanded {
+                WindowMatcherList(matchers: $rule.windowMatchers)
+                    .padding(.top, 4)
+                    .padding(.leading, 36)
+                    .padding(.trailing, 8)
             }
-            Button(role: .destructive, action: onDelete) {
-                Image(systemName: "minus.circle.fill")
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -373,6 +396,75 @@ private struct AppRoutingRow: View {
             Image(systemName: "app.dashed")
                 .resizable()
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Editable list of WindowMatcher overrides for a single AppRoutingRule.
+/// First-match-wins; matchers with empty title are inactive (grayed). Each
+/// row exposes title substring + optional workspace + optional slot. Saving
+/// these rules persists into the JSON sidecar; the placement happens at
+/// runtime via SlotPlacement (no TOML side — purely Swift hook).
+private struct WindowMatcherList: View {
+    @Binding var matchers: [WindowMatcher]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Window-specific overrides (first match wins, by case-insensitive substring of window title)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(Array(matchers.enumerated()), id: \.element.id) { idx, _ in
+                HStack(spacing: 8) {
+                    TextField("title contains…", text: Binding(
+                        get: { matchers[idx].titleSubstring },
+                        set: { matchers[idx].titleSubstring = $0 },
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 180)
+                    Text("→")
+                        .foregroundStyle(.tertiary)
+                    TextField("workspace", text: Binding(
+                        get: { matchers[idx].workspaceOverride ?? "" },
+                        set: { newValue in
+                            let cleaned = newValue.uppercased()
+                            matchers[idx].workspaceOverride = cleaned.isEmpty ? nil : cleaned
+                        },
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 72)
+                    Picker("", selection: Binding<Slot?>(
+                        get: { matchers[idx].slotOverride },
+                        set: { matchers[idx].slotOverride = $0 },
+                    )) {
+                        Text("(inherit slot)").tag(Slot?.none)
+                        ForEach(Slot.allCases) { slot in
+                            Text(slot.displayName).tag(Slot?.some(slot))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 150)
+                    Spacer(minLength: 0)
+                    Button(role: .destructive) {
+                        matchers.remove(at: idx)
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.vertical, 2)
+            }
+            HStack {
+                Button {
+                    matchers.append(WindowMatcher())
+                } label: {
+                    Label("Add window rule", systemImage: "plus.circle")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Spacer()
+            }
         }
     }
 }

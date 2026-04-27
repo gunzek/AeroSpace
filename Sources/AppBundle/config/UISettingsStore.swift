@@ -237,12 +237,16 @@ struct AppRoutingRule: Codable, Equatable, Identifiable {
     var displayName: String
     /// `/Applications/Foo.app` — used by Launch Homepage so we can `NSWorkspace.openApplication(at:)`.
     var appPath: String?
-    /// Workspace name (e.g. "q", "1", "main"). Free-form; matches `move-node-to-workspace <name>`.
+    /// Default workspace for windows of this app — used when no window matcher hits.
     var workspace: String
     var layout: AppLayout = .tiling
-    /// Per-window position within the workspace (Phase 3.6). `.full` = no slot constraint
-    /// (default tiling behaviour); other values pin the window to a specific sub-area.
+    /// Default slot when no window matcher hits. `.full` = no slot constraint.
     var slot: Slot = .full
+    /// Per-window overrides matched by window-title substring/regex. First-match-wins;
+    /// each matcher can override workspace and/or slot. Lets you put e.g.
+    /// Finder window titled "Documents" on the left half and Finder window
+    /// titled "Downloads" on the right half — same app, different positions.
+    var windowMatchers: [WindowMatcher] = []
 
     init(
         id: UUID = UUID(),
@@ -252,6 +256,7 @@ struct AppRoutingRule: Codable, Equatable, Identifiable {
         workspace: String,
         layout: AppLayout = .tiling,
         slot: Slot = .full,
+        windowMatchers: [WindowMatcher] = [],
     ) {
         self.id = id
         self.appId = appId
@@ -260,10 +265,11 @@ struct AppRoutingRule: Codable, Equatable, Identifiable {
         self.workspace = workspace
         self.layout = layout
         self.slot = slot
+        self.windowMatchers = windowMatchers
     }
 
-    // Custom decoder so older JSON sidecars (pre-Phase-3.6, no `slot` field)
-    // load with sensible defaults instead of throwing.
+    // Custom decoder so older JSON sidecars load with sensible defaults
+    // instead of throwing on missing optional fields.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -273,10 +279,37 @@ struct AppRoutingRule: Codable, Equatable, Identifiable {
         workspace = try c.decode(String.self, forKey: .workspace)
         layout = try c.decodeIfPresent(AppLayout.self, forKey: .layout) ?? .tiling
         slot = try c.decodeIfPresent(Slot.self, forKey: .slot) ?? .full
+        windowMatchers = try c.decodeIfPresent([WindowMatcher].self, forKey: .windowMatchers) ?? []
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, appId, displayName, appPath, workspace, layout, slot
+        case id, appId, displayName, appPath, workspace, layout, slot, windowMatchers
+    }
+}
+
+/// Per-window override under an AppRoutingRule. Matcher hits when the window
+/// title contains `titleSubstring` (case-insensitive). When nil, the override
+/// fields fall back to the parent rule's defaults.
+struct WindowMatcher: Codable, Equatable, Identifiable {
+    var id: UUID = UUID()
+    /// Case-insensitive substring match against the window title. Empty
+    /// string never matches (the matcher is treated as inactive).
+    var titleSubstring: String = ""
+    /// Override workspace for matching windows. nil = use parent rule's workspace.
+    var workspaceOverride: String? = nil
+    /// Override slot for matching windows. nil = use parent rule's slot.
+    var slotOverride: Slot? = nil
+
+    init(
+        id: UUID = UUID(),
+        titleSubstring: String = "",
+        workspaceOverride: String? = nil,
+        slotOverride: Slot? = nil,
+    ) {
+        self.id = id
+        self.titleSubstring = titleSubstring
+        self.workspaceOverride = workspaceOverride
+        self.slotOverride = slotOverride
     }
 }
 

@@ -20,7 +20,7 @@ func launchHomepage(_ state: UIState) async {
     // openApplication on an already-running app is a no-op — without this
     // step Honza's report ("vypnuté apps se po Homepage loadly do správného
     // workspace zatímco otevřené zůstaly kde jsou") would still hold.
-    reapplyRoutingAndSlotsToAllWindows()
+    await reapplyRoutingAndSlotsToAllWindows()
 
     let toLaunch: [(URL, String)] = state.appRouting.compactMap { rule in
         guard let path = rule.appPath, FileManager.default.fileExists(atPath: path) else { return nil }

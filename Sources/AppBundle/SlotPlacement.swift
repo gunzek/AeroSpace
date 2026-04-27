@@ -13,26 +13,38 @@ import Common
 /// shorter, idempotent, and keeps the slot logic in one Swift file instead
 /// of three (CmdKind + CmdArgs + Command + manifest plumbing).
 @MainActor
-func applySlotPlacement(_ window: Window) {
+func applySlotPlacement(_ window: Window) async {
     guard let appId = window.app.rawAppBundleId else { return }
     let state = UISettingsStore.shared.state
     guard let rule = state.appRouting.first(where: { $0.appId == appId }) else { return }
-    guard rule.slot != .full else { return }
-    // Floating apps don't live in the tiling tree at all — forcing one into a
-    // TilingContainer slot is a semantic contradiction and was crashing AeroSpace
-    // mid-Launch-Homepage. Skip cleanly.
     guard rule.layout != .floating else { return }
-    guard let workspace = window.nodeWorkspace else { return }
-    // Only place if the window actually landed on the rule's intended workspace —
-    // otherwise the user moved it manually or the rule is stale and we should
-    // not second-guess them.
-    guard workspace.name == rule.workspace else { return }
-    // Defense in depth: window must currently be parented to a TilingContainer.
-    // Floating/popup/dialog windows have other parents (Workspace,
-    // MacosPopupWindowsContainer, …) and our placement code assumes tiling.
+
+    // Resolve effective workspace + slot via window-title matchers. First
+    // active matcher (non-empty substring) whose case-insensitive substring
+    // appears in the window title wins. Falls back to rule defaults.
+    let title = ((try? await window.title) ?? "").lowercased()
+    var effectiveWorkspace = rule.workspace
+    var effectiveSlot = rule.slot
+    for matcher in rule.windowMatchers {
+        let needle = matcher.titleSubstring.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !needle.isEmpty, title.contains(needle) else { continue }
+        if let ws = matcher.workspaceOverride, !ws.isEmpty { effectiveWorkspace = ws }
+        if let s = matcher.slotOverride { effectiveSlot = s }
+        break
+    }
+
+    // If matcher overrode the workspace and we're not already there, move first.
+    if let currentWorkspace = window.nodeWorkspace, currentWorkspace.name != effectiveWorkspace {
+        let target = Workspace.get(byName: effectiveWorkspace)
+        if window.parent != nil { window.unbindFromParent() }
+        window.bind(to: target.rootTilingContainer, adaptiveWeight: WEIGHT_AUTO, index: INDEX_BIND_LAST)
+    }
+
+    guard effectiveSlot != .full else { return }
+    guard let workspace = window.nodeWorkspace, workspace.name == effectiveWorkspace else { return }
     guard window.parent is TilingContainer else { return }
 
-    placeWindowInSlot(window, slot: rule.slot, workspace: workspace)
+    placeWindowInSlot(window, slot: effectiveSlot, workspace: workspace)
 }
 
 /// 3.6 follow-up (extended): walk every currently-known window and apply both
@@ -42,32 +54,36 @@ func applySlotPlacement(_ window: Window) {
 /// for *new* windows, so without this Save would have no effect on already-
 /// open apps and the user would have to close+reopen each one.
 @MainActor
-func reapplyRoutingAndSlotsToAllWindows() {
+func reapplyRoutingAndSlotsToAllWindows() async {
     let state = UISettingsStore.shared.state
     if state.appRouting.isEmpty { return }
     for window in MacWindow.allWindows {
         guard let appId = window.app.rawAppBundleId else { continue }
         guard let rule = state.appRouting.first(where: { $0.appId == appId }) else { continue }
 
-        // 1. Move to the routed workspace if not already there.
-        if let currentWorkspace = window.nodeWorkspace, currentWorkspace.name != rule.workspace {
-            let targetWorkspace = Workspace.get(byName: rule.workspace)
-            // unbindFromParent asserts on already-unbound — guard the same way
-            // place() does, so a stale/duplicate iteration can't take us down.
+        // Resolve effective workspace via title match (matcher may override).
+        let title = ((try? await window.title) ?? "").lowercased()
+        var effectiveWorkspace = rule.workspace
+        for matcher in rule.windowMatchers {
+            let needle = matcher.titleSubstring.trimmingCharacters(in: .whitespaces).lowercased()
+            guard !needle.isEmpty, title.contains(needle) else { continue }
+            if let ws = matcher.workspaceOverride, !ws.isEmpty { effectiveWorkspace = ws }
+            break
+        }
+
+        // 1. Move to the resolved workspace if not already there.
+        if let currentWorkspace = window.nodeWorkspace, currentWorkspace.name != effectiveWorkspace {
+            let targetWorkspace = Workspace.get(byName: effectiveWorkspace)
             if window.parent != nil { window.unbindFromParent() }
             if rule.layout == .floating {
-                // Floating windows live directly under the workspace, not in
-                // the tiling container. Re-binding into rootTilingContainer
-                // would silently start tiling them.
                 window.bind(to: targetWorkspace, adaptiveWeight: WEIGHT_AUTO, index: INDEX_BIND_LAST)
             } else {
                 window.bind(to: targetWorkspace.rootTilingContainer, adaptiveWeight: WEIGHT_AUTO, index: INDEX_BIND_LAST)
             }
         }
 
-        // 2. Apply slot placement (no-op for .full or for floating apps; the
-        //    guards inside applySlotPlacement handle both).
-        applySlotPlacement(window)
+        // 2. Apply slot placement (which itself re-resolves matchers).
+        await applySlotPlacement(window)
     }
 }
 

@@ -263,12 +263,12 @@ private func onWindowDetected(_ window: Window) async throws {
         _ = try await callback.run.runCmdSeq(.defaultEnv.copy(\.windowId, window.windowId), .emptyStdin)
         if !callback.checkFurtherCallbacks {
             HomepageReservation.applyIfNeeded(window) // Phase 3.5: reserved-workspace bump
-            applySlotPlacement(window)                 // Phase 3.6: slot positioning
+            await applySlotPlacement(window)           // Phase 3.6: slot positioning
             return
         }
     }
     HomepageReservation.applyIfNeeded(window)
-    applySlotPlacement(window)
+    await applySlotPlacement(window)
 }
 
 extension WindowDetectedCallback {
