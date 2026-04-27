@@ -478,30 +478,15 @@ private struct KeybindingsSection: View {
             if let bindings = draft {
                 ScrollView {
                     VStack(spacing: 4) {
-                        ForEach(Array(bindings.enumerated()), id: \.element.id) { idx, rule in
-                            HStack(spacing: 8) {
-                                TextField("alt-q", text: shortcutBinding(at: idx))
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 120)
-                                    .font(.system(.body, design: .monospaced))
-                                Text("=")
-                                    .foregroundStyle(.tertiary)
-                                TextField("workspace q", text: actionBinding(at: idx))
-                                    .textFieldStyle(.roundedBorder)
-                                    .font(.system(.body, design: .monospaced))
-                                Button(role: .destructive) {
+                        ForEach(Array(bindings.enumerated()), id: \.element.id) { idx, _ in
+                            KeybindingRow(
+                                shortcut: shortcutBinding(at: idx),
+                                action: actionBinding(at: idx),
+                                onDelete: {
                                     draft?.remove(at: idx)
                                     dirty = true
-                                } label: {
-                                    Image(systemName: "minus.circle.fill")
-                                        .foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color(.textBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                },
+                            )
                         }
                         if bindings.isEmpty {
                             Text("No bindings yet. Click \u{201C}Add binding\u{201D} below.")
@@ -516,7 +501,7 @@ private struct KeybindingsSection: View {
 
                 HStack {
                     Button {
-                        draft?.append(KeybindingRule(shortcut: "", action: ""))
+                        draft?.append(KeybindingRule(shortcut: "", action: "workspace "))
                         dirty = true
                     } label: {
                         Label("Add binding", systemImage: "plus")
@@ -524,7 +509,7 @@ private struct KeybindingsSection: View {
                     Spacer()
                 }
 
-                Text("Action examples: `workspace q`, `focus left`, `move right`, `reload-config`, `layout floating tiling`, `close`. See AeroSpace docs for the full grammar.")
+                Text("Pick an action from the dropdown — it covers the common AeroSpace commands so you don't have to memorise the syntax. \u{201C}Custom (raw action)\u{201D} lets you type any AeroSpace command verbatim.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -586,6 +571,98 @@ private struct KeybindingsSection: View {
                 saveStatus = "Error: \(error)"
             }
         }
+    }
+}
+
+/// One editable row in the Keybindings table. Internally translates between
+/// the user-friendly action picker + parameter field and the raw `action`
+/// string stored in the rule (e.g. picker = "Switch to workspace…", param =
+/// "Q" → action = "workspace Q"). Free-text mode bypasses the picker via
+/// the `.custom` template.
+private struct KeybindingRow: View {
+    @Binding var shortcut: String
+    @Binding var action: String
+    let onDelete: () -> Void
+
+    private var template: KeybindingActionTemplate {
+        KeybindingActionTemplate.detect(from: action)
+    }
+
+    private var parameter: String {
+        KeybindingActionTemplate.parameter(from: action, given: template)
+    }
+
+    private static let groupedTemplates: [(String, [KeybindingActionTemplate])] = {
+        var seenOrder: [String] = []
+        var byCategory: [String: [KeybindingActionTemplate]] = [:]
+        for template in KeybindingActionTemplate.allCases {
+            if byCategory[template.category] == nil { seenOrder.append(template.category) }
+            byCategory[template.category, default: []].append(template)
+        }
+        return seenOrder.map { ($0, byCategory[$0] ?? []) }
+    }()
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField("alt-q", text: $shortcut)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 110)
+                .font(.system(.body, design: .monospaced))
+            Text("=")
+                .foregroundStyle(.tertiary)
+            Picker("", selection: Binding(
+                get: { template },
+                set: { newTemplate in
+                    // Switching templates: keep the parameter when the new
+                    // template still wants one (e.g. "Switch to workspace" →
+                    // "Move window to workspace" both take a workspace name).
+                    let keptParam = newTemplate.requiresParameter ? parameter : ""
+                    action = newTemplate.render(parameter: keptParam)
+                },
+            )) {
+                ForEach(Self.groupedTemplates, id: \.0) { category, templates in
+                    Section(category) {
+                        ForEach(templates) { template in
+                            Text(template.displayName).tag(template)
+                        }
+                    }
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(minWidth: 220, maxWidth: 260)
+
+            if template.requiresParameter {
+                TextField("workspace name", text: Binding(
+                    get: { parameter },
+                    set: { newParam in
+                        action = template.render(parameter: newParam.uppercased())
+                    },
+                ))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 110)
+                .font(.system(.body, design: .monospaced))
+            } else if template == .custom {
+                TextField("raw action (e.g. mode service)", text: Binding(
+                    get: { parameter },
+                    set: { newAction in
+                        action = newAction
+                    },
+                ))
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+            }
+
+            Spacer(minLength: 0)
+            Button(role: .destructive, action: onDelete) {
+                Image(systemName: "minus.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color(.textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 }
 
