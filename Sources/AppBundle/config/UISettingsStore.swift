@@ -92,6 +92,7 @@ enum KeybindingActionTemplate: String, CaseIterable, Identifiable {
     case closeAllButCurrent       = "close-all-windows-but-current"
     // System
     case reloadConfig             = "reload-config"
+    case launchHomepage           = "launch-homepage"
     // Free-text escape hatch — preserves whatever is in `action` verbatim.
     case custom                   = ""
 
@@ -128,6 +129,7 @@ enum KeybindingActionTemplate: String, CaseIterable, Identifiable {
             case .closeWindow:            return "Close window"
             case .closeAllButCurrent:     return "Close all but current"
             case .reloadConfig:           return "Reload config"
+            case .launchHomepage:         return "Launch Homepage"
             case .custom:                 return "Custom (raw action)"
         }
     }
@@ -147,7 +149,7 @@ enum KeybindingActionTemplate: String, CaseIterable, Identifiable {
                 return "Layout"
             case .closeWindow, .closeAllButCurrent:
                 return "Window"
-            case .reloadConfig:
+            case .reloadConfig, .launchHomepage:
                 return "System"
             case .custom:
                 return "Other"

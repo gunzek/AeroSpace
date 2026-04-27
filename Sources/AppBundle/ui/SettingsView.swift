@@ -500,18 +500,15 @@ private struct HomepageSection: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(store.state.appRouting.isEmpty || launching)
 
-                Button {
-                    Task { @MainActor in await ensureExtraWindowsForAllRoutedApps() }
-                } label: {
-                    Label("Spawn missing windows", systemImage: "rectangle.stack.badge.plus")
-                }
-                .help("For each routed app whose rule has multiple window slots, send ⌘N until the app has that many windows. Useful when an app got closed and you want your 2-window setup back without relaunching everything.")
-                .disabled(store.state.appRouting.isEmpty)
-
                 Text("\(store.state.appRouting.count) app\(store.state.appRouting.count == 1 ? "" : "s") will open")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
+
+            Text("Tip: bind a shortcut to Launch Homepage in Keybindings → action \u{201C}Launch Homepage\u{201D} to trigger it without opening Settings.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Toggle("Launch on AeroSpace startup", isOn: Binding(
                 get: { store.state.homepage.launchOnStartup },

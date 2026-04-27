@@ -47,15 +47,15 @@ func ensureExtraWindowsViaCmdN(rule: AppRoutingRule) async {
         }
 
         runningApp.activate()
-        // Long enough that macOS has actually shifted focus over.
-        try? await Task.sleep(nanoseconds: 600_000_000)
+        // Long enough that macOS has actually shifted focus over but not
+        // longer than necessary — Honza wanted Launch Homepage faster.
+        try? await Task.sleep(nanoseconds: 350_000_000)
 
-        // Verify the right app is frontmost — if Launch Homepage still has
-        // another app activating in the background it can steal focus mid-
-        // sleep. If we're not on top, re-activate and wait once more.
+        // Verify the right app is frontmost. If something else stole focus
+        // (parallel-launch race), re-activate and wait once more.
         if NSWorkspace.shared.frontmostApplication?.bundleIdentifier != rule.appId {
             runningApp.activate()
-            try? await Task.sleep(nanoseconds: 400_000_000)
+            try? await Task.sleep(nanoseconds: 250_000_000)
         }
 
         let source = CGEventSource(stateID: .hidSystemState)
@@ -73,7 +73,7 @@ func ensureExtraWindowsViaCmdN(rule: AppRoutingRule) async {
         print("ensureExtraWindowsViaCmdN[\(rule.displayName)]: posted ⌘N (attempt \(attempts), need \(needed))")
 
         // Wait for the new window to register before re-checking.
-        try? await Task.sleep(nanoseconds: 700_000_000)
+        try? await Task.sleep(nanoseconds: 450_000_000)
     }
 
     let finalCount = MacWindow.allWindows.count { $0.app.rawAppBundleId == rule.appId }
