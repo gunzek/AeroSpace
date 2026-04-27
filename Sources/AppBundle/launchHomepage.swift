@@ -46,4 +46,10 @@ func launchHomepage(_ state: UIState) async {
         }
         try? await Task.sleep(nanoseconds: 250_000_000)
     }
+
+    // After all the apps have had a moment to start, top up window counts so
+    // rules with multiple slots end up with that many windows. Done as a
+    // separate pass so we know currentCount is accurate per app.
+    try? await Task.sleep(nanoseconds: 800_000_000)
+    await ensureExtraWindowsForAllRoutedApps()
 }
