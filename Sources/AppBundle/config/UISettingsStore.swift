@@ -14,6 +14,18 @@ struct UIState: Codable, Equatable {
     /// `nil` = "leave [mode.main.binding] to whatever the user has";
     /// non-nil = UI manages the keybinding table.
     var keybindings: [KeybindingRule]? = nil
+    /// Phase 5: when true, on-window-detected emits the
+    /// `--focus-follows-window` flag on `move-node-to-workspace`, so a newly
+    /// routed window pulls focus to its target workspace. Same flag is
+    /// honoured by the Swift hooks for catch-all reservation and slot
+    /// placement so the user always sees where their window landed.
+    var followFocusOnRoute: Bool = true
+    /// Phase 6c: when true, clicking an app in the Dock follows the user to
+    /// that app's workspace (instead of macOS's default — bring the app
+    /// forward but keep workspace where it is). Implemented by an explicit
+    /// handler in GlobalObserver (Phase 6b) once Honza's diagnostic 6a
+    /// confirms whether one's needed at all.
+    var followAppOnDockClick: Bool = true
 
     static let empty = UIState()
 
@@ -24,6 +36,8 @@ struct UIState: Codable, Equatable {
         gaps: GapsSettings? = nil,
         catchAll: CatchAllSettings = .default,
         keybindings: [KeybindingRule]? = nil,
+        followFocusOnRoute: Bool = true,
+        followAppOnDockClick: Bool = true,
     ) {
         self.version = version
         self.appRouting = appRouting
@@ -31,6 +45,8 @@ struct UIState: Codable, Equatable {
         self.gaps = gaps
         self.catchAll = catchAll
         self.keybindings = keybindings
+        self.followFocusOnRoute = followFocusOnRoute
+        self.followAppOnDockClick = followAppOnDockClick
     }
 
     init(from decoder: Decoder) throws {
@@ -41,9 +57,14 @@ struct UIState: Codable, Equatable {
         gaps = try c.decodeIfPresent(GapsSettings.self, forKey: .gaps)
         catchAll = try c.decodeIfPresent(CatchAllSettings.self, forKey: .catchAll) ?? .default
         keybindings = try c.decodeIfPresent([KeybindingRule].self, forKey: .keybindings)
+        followFocusOnRoute = try c.decodeIfPresent(Bool.self, forKey: .followFocusOnRoute) ?? true
+        followAppOnDockClick = try c.decodeIfPresent(Bool.self, forKey: .followAppOnDockClick) ?? true
     }
 
-    enum CodingKeys: String, CodingKey { case version, appRouting, homepage, gaps, catchAll, keybindings }
+    enum CodingKeys: String, CodingKey {
+        case version, appRouting, homepage, gaps, catchAll, keybindings,
+             followFocusOnRoute, followAppOnDockClick
+    }
 }
 
 /// One row in the `[mode.main.binding]` table. Action stays as a raw string
@@ -93,6 +114,7 @@ enum KeybindingActionTemplate: String, CaseIterable, Identifiable {
     // System
     case reloadConfig             = "reload-config"
     case launchHomepage           = "launch-homepage"
+    case applyRouting             = "apply-routing"
     // Free-text escape hatch — preserves whatever is in `action` verbatim.
     case custom                   = ""
 
@@ -130,6 +152,7 @@ enum KeybindingActionTemplate: String, CaseIterable, Identifiable {
             case .closeAllButCurrent:     return "Close all but current"
             case .reloadConfig:           return "Reload config"
             case .launchHomepage:         return "Launch Homepage"
+            case .applyRouting:           return "Apply routing to open windows"
             case .custom:                 return "Custom (raw action)"
         }
     }
@@ -149,7 +172,7 @@ enum KeybindingActionTemplate: String, CaseIterable, Identifiable {
                 return "Layout"
             case .closeWindow, .closeAllButCurrent:
                 return "Window"
-            case .reloadConfig, .launchHomepage:
+            case .reloadConfig, .launchHomepage, .applyRouting:
                 return "System"
             case .custom:
                 return "Other"

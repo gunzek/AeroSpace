@@ -64,6 +64,8 @@ extension CmdArgs {
                 command = MoveNodeToWorkspaceCommand(args: self as! MoveNodeToWorkspaceCmdArgs)
             case .moveWorkspaceToMonitor:
                 command = MoveWorkspaceToMonitorCommand(args: self as! MoveWorkspaceToMonitorCmdArgs)
+            case .applyRouting:
+                command = ApplyRoutingCommand(args: self as! ApplyRoutingCmdArgs)
             case .launchHomepage:
                 command = LaunchHomepageCommand(args: self as! LaunchHomepageCmdArgs)
             case .reloadConfig:

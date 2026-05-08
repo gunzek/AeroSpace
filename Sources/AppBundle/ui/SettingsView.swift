@@ -110,6 +110,37 @@ private struct AppRoutingSection: View {
             Text("Pin apps to specific workspaces. Save writes the rules into ~/.aerospace.toml and reloads AeroSpace.")
                 .foregroundStyle(.secondary)
 
+            // Phase 5 + 6c: two global focus-follow toggles. Saved into the
+            // JSON sidecar live (no Save click needed for these flags); the
+            // followFocusOnRoute change only takes effect after the next Save
+            // since it changes the TOML output, but the app-level honoring
+            // (catch-all + slot placement) is read at runtime so it activates
+            // immediately.
+            Toggle("Follow window when routed (auto-switch to workspace)", isOn: Binding(
+                get: { store.state.followFocusOnRoute },
+                set: { newValue in
+                    try? store.update { $0.followFocusOnRoute = newValue }
+                    markDirty() // remind the user to Save so TOML gets the new flag
+                },
+            ))
+            .toggleStyle(.switch)
+            Text("Newly opened apps pull you to their workspace so you see them. Save after toggling — the change writes to ~/.aerospace.toml.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle("Follow app to its workspace on Dock click", isOn: Binding(
+                get: { store.state.followAppOnDockClick },
+                set: { newValue in
+                    try? store.update { $0.followAppOnDockClick = newValue }
+                },
+            ))
+            .toggleStyle(.switch)
+            Text("Click Safari in the Dock → AeroSpace switches to the workspace where Safari already lives, instead of yanking the window to you.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
             HStack {
                 Button {
                     addAppFromPicker()

@@ -54,13 +54,14 @@ enum TomlMarkerWriter {
             }
         }
 
+        let focusFlag = state.followFocusOnRoute ? "--focus-follows-window " : ""
         for rule in state.appRouting {
             try requireSafeLiteral(rule.appId, field: "appId")
             try requireSafeLiteral(rule.workspace, field: "workspace")
             lines.append("")
             lines.append("[[on-window-detected]]")
             lines.append("if.app-id = '\(rule.appId)'")
-            var commands = ["move-node-to-workspace \(rule.workspace)"]
+            var commands = ["move-node-to-workspace \(focusFlag)\(rule.workspace)"]
             if rule.layout == .floating { commands.append("layout floating") }
             let runArr = commands.map { "'\($0)'" }.joined(separator: ", ")
             lines.append("run = [\(runArr)]")

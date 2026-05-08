@@ -54,5 +54,11 @@ enum HomepageReservation {
             adaptiveWeight: WEIGHT_AUTO,
             index: INDEX_BIND_LAST,
         )
+        // Phase 5 honour: if the user wants follow-on-route, pull focus to
+        // the catch-all workspace too. Same toggle as the routing rule
+        // generates `--focus-follows-window` for.
+        if state.followFocusOnRoute {
+            _ = targetWorkspace.focusWorkspace()
+        }
     }
 }

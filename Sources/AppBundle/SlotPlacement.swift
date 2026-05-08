@@ -94,6 +94,10 @@ func applySlotPlacement(_ window: Window) async {
         let target = Workspace.get(byName: effectiveWorkspace)
         if window.parent != nil { window.unbindFromParent() }
         window.bind(to: target.rootTilingContainer, adaptiveWeight: WEIGHT_AUTO, index: INDEX_BIND_LAST)
+        // Phase 5: pull focus to the matcher's target workspace too.
+        if state.followFocusOnRoute {
+            _ = target.focusWorkspace()
+        }
     }
 
     guard effectiveSlot != .full else { return }
@@ -101,6 +105,12 @@ func applySlotPlacement(_ window: Window) async {
     guard window.parent is TilingContainer else { return }
 
     placeWindowInSlot(window, slot: effectiveSlot, workspace: workspace)
+    // Phase 5: even if the upstream `--focus-follows-window` flag took us to
+    // the workspace already, repeating focusWorkspace() is safe (idempotent).
+    // Critical when slot placement crossed a workspace boundary above.
+    if state.followFocusOnRoute {
+        _ = workspace.focusWorkspace()
+    }
 }
 
 /// 3.6 follow-up (extended): walk every currently-known window and apply both

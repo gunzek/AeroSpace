@@ -3,6 +3,7 @@ public enum CmdKind: String, CaseIterable, Equatable, Sendable {
 
     case _false = "false"
     case _true = "true"
+    case applyRouting = "apply-routing" // personal-fork
     case balanceSizes = "balance-sizes"
     case close
     case closeAllWindowsButCurrent = "close-all-windows-but-current"
@@ -53,6 +54,8 @@ func initSubcommands() -> [String: any SubCommandParserProtocol] {
                 result[kind.rawValue] = SubCommandParser(FalseCmdArgs.init)
             case ._true:
                 result[kind.rawValue] = SubCommandParser(TrueCmdArgs.init)
+            case .applyRouting:
+                result[kind.rawValue] = SubCommandParser(ApplyRoutingCmdArgs.init)
             case .balanceSizes:
                 result[kind.rawValue] = SubCommandParser(BalanceSizesCmdArgs.init)
             case .close:
