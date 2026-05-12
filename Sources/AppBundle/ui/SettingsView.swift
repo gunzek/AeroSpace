@@ -620,12 +620,15 @@ private struct KeybindingsSection: View {
             }
 
             if let bindings = draft {
+                let dupShortcuts = duplicateShortcutSet(in: bindings)
                 ScrollView {
                     VStack(spacing: 4) {
                         ForEach(Array(bindings.enumerated()), id: \.element.id) { idx, _ in
+                            let sc = bindings[idx].shortcut.trimmingCharacters(in: .whitespaces).lowercased()
                             KeybindingRow(
                                 shortcut: shortcutBinding(at: idx),
                                 action: actionBinding(at: idx),
+                                isDuplicate: !sc.isEmpty && dupShortcuts.contains(sc),
                                 onDelete: {
                                     draft?.remove(at: idx)
                                     dirty = true
@@ -660,7 +663,11 @@ private struct KeybindingsSection: View {
             }
 
             HStack {
-                if let saveStatus {
+                if hasDuplicateShortcuts {
+                    Label("Duplicate shortcut(s) — TOML refuses two of the same key in [mode.main.binding]", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else if let saveStatus {
                     Text(saveStatus)
                         .font(.caption)
                         .foregroundStyle(saveStatus.hasPrefix("Error") ? .red : .secondary)
@@ -669,7 +676,7 @@ private struct KeybindingsSection: View {
                 Button("Save") { save() }
                     .keyboardShortcut("s", modifiers: .command)
                     .buttonStyle(.borderedProminent)
-                    .disabled(!dirty)
+                    .disabled(!dirty || hasDuplicateShortcuts)
             }
             Spacer()
         }
@@ -677,6 +684,25 @@ private struct KeybindingsSection: View {
         .onChange(of: store.state.keybindings) { newValue in
             if !dirty { draft = newValue }
         }
+    }
+
+    /// Set of shortcuts that appear more than once in the draft (case-
+    /// insensitive, whitespace-trimmed). Empty shortcut is excluded — it
+    /// means an in-progress row the user hasn't typed yet.
+    private func duplicateShortcutSet(in bindings: [KeybindingRule]) -> Set<String> {
+        var seen: Set<String> = []
+        var dups: Set<String> = []
+        for b in bindings {
+            let sc = b.shortcut.trimmingCharacters(in: .whitespaces).lowercased()
+            guard !sc.isEmpty else { continue }
+            if seen.contains(sc) { dups.insert(sc) } else { seen.insert(sc) }
+        }
+        return dups
+    }
+
+    private var hasDuplicateShortcuts: Bool {
+        guard let draft else { return false }
+        return !duplicateShortcutSet(in: draft).isEmpty
     }
 
     private func shortcutBinding(at idx: Int) -> Binding<String> {
@@ -770,6 +796,7 @@ private struct KeybindingsSection: View {
 private struct KeybindingRow: View {
     @Binding var shortcut: String
     @Binding var action: String
+    var isDuplicate: Bool = false
     let onDelete: () -> Void
 
     private var template: KeybindingActionTemplate {
@@ -840,6 +867,11 @@ private struct KeybindingRow: View {
                 .font(.system(.body, design: .monospaced))
             }
 
+            if isDuplicate {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help("Another row uses the same shortcut. TOML rejects duplicate keys in [mode.main.binding] — change one to a unique shortcut before saving.")
+            }
             Spacer(minLength: 0)
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "minus.circle.fill")
@@ -851,6 +883,10 @@ private struct KeybindingRow: View {
         .padding(.vertical, 4)
         .background(Color(.textBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(isDuplicate ? Color.orange : Color.clear, lineWidth: 1.5),
+        )
     }
 }
 
