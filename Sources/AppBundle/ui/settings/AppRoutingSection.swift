@@ -311,44 +311,129 @@ private struct AppRoutingRow: View {
 }
 
 /// Editable list of WindowMatcher overrides for a single AppRoutingRule.
-/// First-match-wins; matchers with empty title are inactive (grayed). Each
-/// row exposes title substring + optional workspace + optional slot. Edits
-/// flow through the parent rule binding, so they persist live into the JSON
-/// sidecar; the placement happens at runtime via SlotPlacement (no TOML side
-/// — purely Swift hook).
+/// Each row exposes title substring + optional workspace + optional slot and
+/// works in one of two modes, mirroring SlotPlacement's two-pass resolution:
+/// non-empty title = title matcher (checked first, in list order), empty
+/// title = claim-on-arrival slot (fills with incoming windows in order).
+/// Edits flow through the parent rule binding, so they persist live into the
+/// JSON sidecar; the placement happens at runtime via SlotPlacement (no TOML
+/// side — purely Swift hook).
 private struct WindowMatcherList: View {
     @Binding var matchers: [WindowMatcher]
 
+    /// Set-time-safe element binding: resolves the row by its stable id on
+    /// every get/set instead of trusting an index captured at render time.
+    /// See the comment inside the ForEach for the failure mode this avoids.
+    /// The get-fallback only fires if the row vanished mid-update (the set
+    /// guard then drops the write on the floor — nothing to write to).
+    private func matcherBinding(for id: UUID) -> Binding<WindowMatcher> {
+        Binding(
+            get: { matchers.first { $0.id == id } ?? WindowMatcher() },
+            set: { newValue in
+                guard let i = matchers.firstIndex(where: { $0.id == id }) else { return }
+                matchers[i] = newValue
+            },
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Window slots — first window of this app to open takes slot 1, second takes slot 2, and so on. Order in this list = order of priority. Closing a window frees its slot for the next one to arrive.")
+            Text("Per-window overrides. Title rows are checked first, top to bottom \u{2014} the first whose text the window title contains (case-insensitive) wins, even over arrival rows above it. Rows with an empty title are arrival slots: windows that no title row matched claim them in order (Arrival 1 fills first), and closing a window frees its slot for the next one. Order within each kind is priority \u{2014} use the arrows to reorder \u{2014} but reordering only affects windows that arrive or change later; already-placed windows keep their assignment.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            ForEach(Array(matchers.enumerated()), id: \.element.id) { idx, _ in
+            ForEach(Array(matchers.enumerated()), id: \.element.id) { idx, matcher in
+                // `idx` is safe only for RENDER-time decisions (labels,
+                // disabled states) — it is recomputed on every body pass.
+                // Mutations must NOT capture it: on macOS the NSTextField
+                // behind a focused TextField can commit its text while
+                // another row's delete/reorder is mid-flight (focus loss
+                // during teardown), and a setter firing through a stale idx
+                // writes to the wrong row or traps out of bounds. Every
+                // binding and button action below therefore re-resolves the
+                // row by its stable `id` at set-time.
+                let id = matcher.id
+                // Trimmed check matches the runtime exactly: SlotPlacement
+                // trims whitespace before deciding which pass a matcher
+                // belongs to, so a row containing only spaces is still an
+                // arrival slot and must show as one.
+                let isTitleMatcher = !matcher.titleSubstring
+                    .trimmingCharacters(in: .whitespaces).isEmpty
+                // Arrival slots fill in list order *among themselves* (title
+                // rows don't consume arrival order), so the visible number
+                // counts only the empty-title rows above this one. Title rows
+                // get a mode word instead of a number — a flat "Slot 3" on a
+                // title row would imply arrival ordering it doesn't have.
+                let arrivalNumber = matchers[..<idx]
+                    .filter { $0.titleSubstring.trimmingCharacters(in: .whitespaces).isEmpty }
+                    .count + 1
                 HStack(spacing: 8) {
-                    Text("Slot \(idx + 1)")
+                    // Mode badge — makes the two row kinds tell apart at a
+                    // glance even in the dense row: textformat = title
+                    // matcher, tray = claim-on-arrival slot.
+                    Image(systemName: isTitleMatcher ? "textformat" : "tray")
+                        .foregroundStyle(isTitleMatcher ? Color.accentColor : Color.secondary)
+                        .frame(width: 16)
+                        .help(isTitleMatcher
+                            ? "Title matcher \u{2014} applies to windows whose title contains the text (case-insensitive)."
+                            : "Arrival slot \u{2014} claims the next window of this app that no title matcher caught.")
+                    Text(isTitleMatcher ? "Title" : "Arrival \(arrivalNumber)")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
-                        .frame(width: 50, alignment: .leading)
+                        .frame(width: 56, alignment: .leading)
+                    TextField(
+                        "title contains\u{2026} (empty = next free window)",
+                        text: matcherBinding(for: id).titleSubstring,
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .frame(width: 200)
+                    .help("Case-insensitive \u{201C}contains\u{201D} match against the window title (surrounding spaces are ignored). Leave empty to make this row a claim-on-arrival slot instead.")
                     // Empty = inherit the rule's workspace; the picker
                     // renders that as "(none)" and uppercases typed names,
                     // matching the old TextField's canonicalization.
                     WorkspacePicker(
                         label: "",
                         workspace: Binding(
-                            get: { matchers[idx].workspaceOverride ?? "" },
+                            get: { matchers.first { $0.id == id }?.workspaceOverride ?? "" },
                             set: { newValue in
-                                matchers[idx].workspaceOverride = newValue.isEmpty ? nil : newValue
+                                guard let i = matchers.firstIndex(where: { $0.id == id }) else { return }
+                                matchers[i].workspaceOverride = newValue.isEmpty ? nil : newValue
                             },
                         ),
                         allowEmpty: true,
                     )
                     // nil = inherit the rule's slot (dashed diagram).
-                    OptionalSlotPicker(slot: $matchers[idx].slotOverride)
+                    OptionalSlotPicker(slot: matcherBinding(for: id).slotOverride)
                     Spacer(minLength: 0)
+                    // Reorder = priority change in both runtime passes. Drag
+                    // (.onMove) needs a real List — this is a VStack nested in
+                    // a Form row — so explicit buttons it is. The mutation
+                    // goes through the same rule binding as deletes (store
+                    // update + debounced sync; matchers are JSON-only anyway,
+                    // the TOML projection never sees them).
+                    Button {
+                        guard let i = matchers.firstIndex(where: { $0.id == id }), i > 0 else { return }
+                        matchers.swapAt(i, i - 1)
+                    } label: {
+                        Image(systemName: "chevron.up")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(idx == 0)
+                    .help("Move up \u{2014} earlier rows win when several could match. Affects only windows placed from now on.")
+                    Button {
+                        guard let i = matchers.firstIndex(where: { $0.id == id }), i < matchers.count - 1 else { return }
+                        matchers.swapAt(i, i + 1)
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(idx == matchers.count - 1)
+                    .help("Move down \u{2014} later rows only get windows the rows above passed on. Affects only windows placed from now on.")
                     Button(role: .destructive) {
-                        matchers.remove(at: idx)
+                        matchers.removeAll { $0.id == id }
                     } label: {
                         Image(systemName: "minus.circle.fill")
                             .foregroundStyle(.secondary)
@@ -359,9 +444,9 @@ private struct WindowMatcherList: View {
             }
             HStack {
                 Button {
-                    // New slots are title-agnostic by default — that's the
-                    // "claim-on-arrival" mode. The titleSubstring field is
-                    // intentionally not surfaced in the UI for now.
+                    // New rows start title-agnostic (claim-on-arrival mode);
+                    // typing into the title field flips them into title
+                    // matchers.
                     matchers.append(WindowMatcher())
                 } label: {
                     Label("Add window slot", systemImage: "plus.circle")
