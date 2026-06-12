@@ -10,6 +10,7 @@
 #                  (useful when someone is actively working on the MacBook).
 
 set -e
+set -o pipefail   # a failed remote step must not be masked by `| tail`
 cd "$(dirname "$0")"
 
 HOST="honzavilimec@192.168.1.140"
@@ -29,7 +30,16 @@ if [ "$1" = "--build-only" ]; then
 fi
 
 echo "→ remote rebuild + install (kills and restarts AeroSpace there)"
-ssh -o BatchMode=yes "$HOST" "cd $REMOTE_DIR && git log --oneline -1 && ./rebuild-and-install.sh" | tail -4
+# Full remote log lands in /tmp/deploy-macbook.log; show the interesting tail.
+# Unlock the keychain first so codesign can use the aerospace-dev identity in
+# this non-interactive session (password read from credentials.md by hand —
+# do NOT hardcode it here; ssh-agent style prompt-free unlock).
+ssh -o BatchMode=yes "$HOST" "cd $REMOTE_DIR && git log --oneline -1 && security unlock-keychain -p \"\$(cat ~/.aerospace-keychain-pass 2>/dev/null)\" ~/Library/Keychains/login.keychain-db 2>/dev/null; ./rebuild-and-install.sh" > /tmp/deploy-macbook.log 2>&1 || {
+    echo "❌ remote rebuild+install failed — full log:"
+    tail -30 /tmp/deploy-macbook.log
+    exit 1
+}
+grep -E "^→|signing with|BUILD SUCCEEDED|✅|❌" /tmp/deploy-macbook.log | tail -8
 
 # rebuild-and-install.sh already waits up to 8 s for the agent, but the
 # freshly swapped binary occasionally dies once right after first launch
