@@ -71,7 +71,7 @@ final class SettingsPersister: ObservableObject {
             // before touching disk so only the latest state gets written.
             guard !Task.isCancelled else { return }
             self?.debounceTask = nil
-            await self?.performSync()
+            await self?.performSync(trigger: "debounced")
         }
     }
 
@@ -82,7 +82,7 @@ final class SettingsPersister: ObservableObject {
         debounceTask?.cancel()
         debounceTask = nil
         Task { @MainActor [weak self] in
-            await self?.performSync()
+            await self?.performSync(trigger: "immediate")
         }
     }
 
@@ -100,13 +100,23 @@ final class SettingsPersister: ObservableObject {
     /// in-flight run performs one more pass after finishing — since every
     /// pass projects the *full* current store state, one trailing pass covers
     /// any number of parked requests.
-    private func performSync() async {
+    /// Diagnostics (phase 8): `.sync` lines are logged at FIRE time, not
+    /// schedule time — a debounce timer that gets superseded never writes, so
+    /// logging it would just spam. The same applies to the validation hold:
+    /// it's logged here (once per sync attempt) rather than in
+    /// `refreshHoldReason()`, which runs on every keystroke during a debounce.
+    /// Each pass logs its own "started" line; the trailing pass triggered by
+    /// a parked `needsResync` is labeled "(coalesced)" — it writes the full
+    /// current state on behalf of however many requests parked, and reusing
+    /// the first pass's trigger label would lie about who caused it.
+    private func performSync(trigger: String) async {
         if syncInFlight {
             needsResync = true
             return
         }
         syncInFlight = true
         defer { syncInFlight = false }
+        var passTrigger = trigger
         repeat {
             needsResync = false
             // Whole-state validity gate: the persister projects the FULL
@@ -117,7 +127,12 @@ final class SettingsPersister: ObservableObject {
             // edit (and every pass projects full state), the first sync after
             // the state turns valid writes everything that was held.
             refreshHoldReason()
-            if holdReason != nil { continue }
+            if let holdReason {
+                DiagnosticsLog.shared.log(.sync, "sync held: \(holdReason)")
+                continue
+            }
+            DiagnosticsLog.shared.log(.sync, "sync started (\(passTrigger))")
+            passTrigger = "coalesced"
             syncing = true
             await writeAndReload()
             syncing = false
@@ -134,6 +149,9 @@ final class SettingsPersister: ObservableObject {
             try TomlMarkerWriter.writeBlock(state: state, to: configUrl)
             if let token: RunSessionGuard = .isServerEnabled {
                 try await runLightSession(.menuBarButton, token) { _ = try await reloadConfig() }
+                DiagnosticsLog.shared.log(.sync, "wrote TOML + reload ok")
+            } else {
+                DiagnosticsLog.shared.log(.sync, "wrote TOML (server disabled, reload skipped)")
             }
             lastError = nil
         } catch TomlMarkerWriter.WriteError.duplicateGapsSection {
@@ -153,6 +171,11 @@ final class SettingsPersister: ObservableObject {
             )
         } catch {
             lastError = SyncError(message: "Error: \(error)", scope: .general)
+        }
+        // One error line covers all catch arms — lastError always reflects
+        // THIS run here (success path nils it before falling through).
+        if let lastError {
+            DiagnosticsLog.shared.log(.sync, "sync error: \(lastError.message)")
         }
     }
 }

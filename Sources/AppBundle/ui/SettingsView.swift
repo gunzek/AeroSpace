@@ -46,6 +46,7 @@ struct SettingsView: View {
                     case .gaps:        GapsSection(store: store)
                     case .catchAll:    CatchAllSection(store: store)
                     case .tweaks:      TweaksSection()
+                    case .diagnostics: DiagnosticsSection()
                     case .about:       AboutSection(store: store)
                 }
             }
@@ -63,6 +64,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case gaps
     case catchAll
     case tweaks
+    case diagnostics
     case about
 
     var id: String { rawValue }
@@ -75,6 +77,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
             case .gaps:        return "Gaps"
             case .catchAll:    return "Catch-all"
             case .tweaks:      return "Tweaks"
+            case .diagnostics: return "Diagnostics"
             case .about:       return "About"
         }
     }
@@ -87,6 +90,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
             case .gaps:        return "ruler"
             case .catchAll:    return "tray.2"
             case .tweaks:      return "gearshape.2"
+            case .diagnostics: return "stethoscope"
             case .about:       return "info.circle"
         }
     }

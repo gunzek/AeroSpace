@@ -28,6 +28,7 @@ import Foundation
         checkAccessibilityPermissions()
         startUnixSocketServer()
         GlobalObserver.initObserver()
+        DockClickMonitor.initObserver() // phase 8: Dock-click follow for already-frontmost apps
         Workspace.garbageCollectUnusedWorkspaces() // init workspaces
         _ = Workspace.all.first?.focusWorkspace()
         await runHeavyCompleteRefreshSession(
