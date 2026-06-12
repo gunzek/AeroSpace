@@ -27,7 +27,7 @@ final class TomlMarkerWriterTest: XCTestCase {
 
             [[on-window-detected]]
             if.app-id = 'com.apple.Safari'
-            run = ['move-node-to-workspace q']
+            run = ['move-node-to-workspace --focus-follows-window q']
 
             \(TomlMarkerWriter.endLine)
             """)
@@ -44,7 +44,7 @@ final class TomlMarkerWriterTest: XCTestCase {
 
             [[on-window-detected]]
             if.app-id = 'com.apple.systempreferences'
-            run = ['move-node-to-workspace z', 'layout floating']
+            run = ['move-node-to-workspace --focus-follows-window z', 'layout floating']
 
             \(TomlMarkerWriter.endLine)
             """)
