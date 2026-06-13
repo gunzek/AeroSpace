@@ -184,9 +184,16 @@ enum KeybindingActionTemplate: String, CaseIterable, Identifiable {
     static func detect(from action: String) -> KeybindingActionTemplate {
         let trimmed = action.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return .workspaceSwitch }
-        // Parameterised templates first — exact-match the prefix.
-        if trimmed.hasPrefix("workspace ") { return .workspaceSwitch }
-        if trimmed.hasPrefix("move-node-to-workspace ") { return .workspaceMoveTo }
+        // Parameterised templates: a present argument matches the prefix, but a
+        // still-empty argument ("workspace " — what "Add binding" creates and
+        // what clearing the workspace combo produces) trims down to the bare
+        // command word and must resolve to the SAME template, not fall through
+        // to `.custom`. Otherwise the picker bounces to "Custom (raw action)"
+        // the moment the user clears the workspace, and an argument-less
+        // `'workspace'` action would slip past the incomplete-row hold (`.custom`
+        // requires no parameter) and reach the TOML, breaking reload-config.
+        if trimmed == Self.workspaceSwitch.rawValue || trimmed.hasPrefix("workspace ") { return .workspaceSwitch }
+        if trimmed == Self.workspaceMoveTo.rawValue || trimmed.hasPrefix("move-node-to-workspace ") { return .workspaceMoveTo }
         // Otherwise look for an exact match against any non-parameterised template.
         for template in KeybindingActionTemplate.allCases
         where template != .custom && !template.requiresParameter {
@@ -370,7 +377,15 @@ enum Slot: String, Codable, CaseIterable, Identifiable {
 
     /// Two slots conflict when one is contained within the other (e.g. `leftHalf`
     /// covers `topLeft` + `bottomLeft`). Used by the UI to surface overlap warnings.
+    ///
+    /// `.full` is the "no slot constraint" sentinel — its placement is a runtime
+    /// no-op (`placeWindowInSlot` returns false for `.full`), so it never claims a
+    /// region and therefore never conflicts, not even with another `.full`. Two
+    /// default `.full` rules on one workspace are a completely normal config; if
+    /// `.full` counted as overlapping itself, that ordinary case would hold ALL
+    /// TOML sync (gaps, keybindings, routing) forever (H1).
     func overlaps(_ other: Slot) -> Bool {
+        if self == .full || other == .full { return false }
         if self == other { return true }
         let half: (Slot) -> Set<Slot> = {
             switch $0 {
@@ -414,6 +429,21 @@ final class UISettingsStore: ObservableObject {
 
     let url: URL
 
+    /// P3 (perf): the JSON sidecar write is debounced. `update()` used to do
+    /// createDirectory + full-state encode + atomic write on EVERY mutation —
+    /// i.e. once per keystroke in the settings UI. The in-memory `state` (and
+    /// thus the `@Published` UI + the TOML persister) is updated immediately,
+    /// but the disk write is coalesced behind a short timer so a burst of edits
+    /// hits the disk once. A clean quit flushes synchronously (see `flushNow`,
+    /// wired from the app's termination paths) so nothing is lost on Cmd-Q; a
+    /// hard crash can lose at most one debounce window of edits, which is
+    /// acceptable for a UI-convenience sidecar.
+    private var pendingWrite: Task<Void, Never>? = nil
+    /// The state still owed to disk, or nil when the sidecar is up to date.
+    /// Held so `flushNow()` can write the latest even if the timer hasn't fired.
+    private var dirtyState: UIState? = nil
+    private static let writeDebounceNanoseconds: UInt64 = 400_000_000
+
     private init() {
         let defaultUrl = FileManager.default.homeDirectoryForCurrentUser
             .appending(path: ".config/aerospace/ui-state.json")
@@ -421,37 +451,57 @@ final class UISettingsStore: ObservableObject {
         self.state = (try? Self.read(from: defaultUrl)) ?? .empty
     }
 
-    /// Test seam — lets unit tests target a temp file.
-    init(url: URL) {
-        self.url = url
-        self.state = (try? Self.read(from: url)) ?? .empty
-    }
-
-    /// Apply an in-place mutation, persist, and publish. Mutation runs only if
-    /// persist succeeds, so observers never see a state that didn't make it to disk.
+    /// Apply an in-place mutation, publish immediately, and schedule a debounced
+    /// disk write. The mutation can no longer fail (the encode/write moved off
+    /// the synchronous path), but `throws` is kept so existing `try?` call sites
+    /// stay valid; an encode failure now surfaces from the debounced write
+    /// instead (logged, not thrown — there is no caller to catch it by then).
     func update(_ mutate: (inout UIState) -> Void) throws {
         var next = state
         mutate(&next)
-        try persist(next)
         state = next
+        scheduleWrite(next)
     }
 
-    func replace(_ next: UIState) throws {
-        try persist(next)
-        state = next
-    }
-
-    func reload() {
-        if let loaded = try? Self.read(from: url) {
-            state = loaded
+    /// Coalesce the disk write: remember the latest state and (re)arm the timer.
+    private func scheduleWrite(_ next: UIState) {
+        dirtyState = next
+        pendingWrite?.cancel()
+        pendingWrite = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.writeDebounceNanoseconds)
+            guard !Task.isCancelled else { return }
+            self?.flushNow()
         }
     }
 
+    /// Write any pending state to disk synchronously and clear the dirty flag.
+    /// Safe to call when nothing is pending (no-op). Wired from the app's
+    /// termination paths (clean Quit + signal handler) so a debounced edit is
+    /// never lost on a graceful exit.
+    func flushNow() {
+        pendingWrite?.cancel()
+        pendingWrite = nil
+        guard let next = dirtyState else { return }
+        dirtyState = nil
+        do {
+            try persist(next)
+        } catch {
+            DiagnosticsLog.shared.log(.sync, "ui-state write failed: \(error)")
+        }
+    }
+
+    /// Created once (not per write — P3) the first time the sidecar directory
+    /// is needed; FileManager.createDirectory is idempotent but the stat IPC it
+    /// does was on the per-keystroke path.
+    private var dirEnsured = false
     private func persist(_ state: UIState) throws {
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true,
-        )
+        if !dirEnsured {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+            )
+            dirEnsured = true
+        }
         let data = try JSONEncoder.aeroSpaceDefault.encode(state)
         try data.write(to: url, options: [.atomic])
     }

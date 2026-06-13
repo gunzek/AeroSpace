@@ -12,7 +12,9 @@ set -e
 cd "$(dirname "$0")"
 
 echo "→ killing any in-flight build processes"
-pkill -9 -f "build-release-personal\|build-debug\|xcodebuild\|swift-build" 2>/dev/null || true
+# BSD pkill -f uses extended regex, so alternation is a bare `|` — the old
+# `\|` was treated as a LITERAL pipe and matched nothing (verified empirically).
+pkill -9 -f "build-release-personal|build-debug|xcodebuild|swift-build" 2>/dev/null || true
 sleep 2
 
 echo "→ wiping .release and .xcode-build"
@@ -31,12 +33,9 @@ if security find-identity -v -p codesigning 2>/dev/null | grep -q aerospace-dev;
     echo "  (signing with aerospace-dev identity)"
     identity_args=(--codesign-identity aerospace-dev)
 fi
+# `set -e` already aborts the script if the build fails, so the old
+# `build_exit=$?` check was dead code ($? is always 0 here) — dropped it.
 ./build-release-personal.sh "${identity_args[@]}"
-build_exit=$?
-if [ $build_exit -ne 0 ]; then
-    echo "❌ release build failed (exit $build_exit)"
-    exit $build_exit
-fi
 
 echo "→ installing"
 ./install-personal.sh

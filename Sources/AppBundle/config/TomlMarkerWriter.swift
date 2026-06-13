@@ -75,8 +75,15 @@ enum TomlMarkerWriter {
     /// Pure; the on-disk variant is `writeBlock(state:to:)`.
     static func projectInto(existing: String, block: String) throws -> String {
         let lines = existing.components(separatedBy: "\n")
-        let startIdx = lines.firstIndex { $0.hasPrefix(startKey) }
-        let endIdx   = lines.lastIndex  { $0.hasPrefix(endKey) }
+        // Trim before the prefix check, exactly like hasUnmanagedSection /
+        // analyzeBindingSection / stripBindingSection do. Matching the RAW line
+        // here while those trim meant an indented marker (`  # AEROSPACE-UI …`)
+        // was invisible to projectInto but visible to the duplicate check — so
+        // we'd append a SECOND managed block (duplicate [gaps]/[[on-window-detected]]
+        // → reload-config fails) and a later splice could delete user content
+        // between the two blocks. All marker detection must be trim-then-hasPrefix.
+        let startIdx = lines.firstIndex { $0.trimmingCharacters(in: .whitespaces).hasPrefix(startKey) }
+        let endIdx   = lines.lastIndex  { $0.trimmingCharacters(in: .whitespaces).hasPrefix(endKey) }
 
         switch (startIdx, endIdx) {
             case (nil, nil):
@@ -151,40 +158,147 @@ enum TomlMarkerWriter {
 
     // MARK: import + strip helpers
 
-    /// Parse the user's existing `[mode.main.binding]` section into
-    /// `(shortcut, action)` pairs. Comments are skipped. Multi-action arrays
-    /// (e.g. `['reload-config', 'mode main']`) come back with their raw `[...]`
-    /// form intact so the UI's Custom-action template can round-trip them.
-    static func extractBindingSection(from existing: String) -> [(shortcut: String, action: String)] {
+    /// Outcome of analysing the user's `[mode.main.binding]` table for import.
+    ///
+    /// The managed writer can only represent a binding as
+    /// `shortcut = 'single-action'` — one single-quoted TOML literal, no `'`
+    /// and no newline inside it. Anything richer (multi-action arrays,
+    /// multi-line values, literal/basic strings the line parser can't cleanly
+    /// extract, or a value containing a `'`) would either be silently dropped
+    /// or, worse, written back in a form `generateBlock`→`requireSafeLiteral`
+    /// rejects forever — and since the original table is stripped first, that
+    /// permanently breaks every future sync. So import is all-or-nothing: if
+    /// ANY binding is unrepresentable we refuse and name what would be lost,
+    /// rather than dropping or poisoning.
+    struct BindingImportAnalysis {
+        /// Bindings we can faithfully round-trip through the managed writer.
+        var importable: [(shortcut: String, action: String)] = []
+        /// Human-readable descriptions of bindings we cannot represent. When
+        /// non-empty the caller MUST refuse the import (don't strip, don't drop).
+        var unrepresentable: [String] = []
+    }
+
+    /// Parse the user's existing `[mode.main.binding]` section, classifying each
+    /// binding as importable or unrepresentable. Multi-line constructs (open
+    /// `[...` arrays, `'''`/`"""` strings) are consumed as a unit so a later
+    /// line is never mistaken for a fresh binding.
+    static func analyzeBindingSection(from existing: String) -> BindingImportAnalysis {
         let lines = existing.components(separatedBy: "\n")
+        var analysis = BindingImportAnalysis()
         var insideMarker = false
         var insideBinding = false
-        var result: [(String, String)] = []
-        for raw in lines {
+        var idx = 0
+        while idx < lines.count {
+            let raw = lines[idx]
+            idx += 1
             let line = raw.trimmingCharacters(in: .whitespaces)
             if line.hasPrefix(startKey) { insideMarker = true; insideBinding = false; continue }
             if line.hasPrefix(endKey)   { insideMarker = false; insideBinding = false; continue }
             if insideMarker { continue }
             if line == "[mode.main.binding]" { insideBinding = true; continue }
+            // Any other top-level table header ends the binding section.
             if insideBinding, line.hasPrefix("["), line.hasSuffix("]") {
                 insideBinding = false
                 continue
             }
             if !insideBinding { continue }
             if line.isEmpty || line.hasPrefix("#") { continue }
-            guard let equalsIdx = line.firstIndex(of: "=") else { continue }
+            guard let equalsIdx = line.firstIndex(of: "=") else {
+                // A non-blank, non-comment line with no `=` inside the binding
+                // table is something the line parser can't read (dotted/inline
+                // table, continuation, …). Refuse rather than drop it silently.
+                analysis.unrepresentable.append("unparseable line: \(line)")
+                continue
+            }
             let key = String(line[..<equalsIdx]).trimmingCharacters(in: .whitespaces)
-            var value = String(line[line.index(after: equalsIdx)...]).trimmingCharacters(in: .whitespaces)
-            value = stripInlineComment(value)
+            let rhsRaw = String(line[line.index(after: equalsIdx)...]).trimmingCharacters(in: .whitespaces)
+            let value = stripInlineComment(rhsRaw)
+            let label = key.isEmpty ? line : key
+
+            // Multi-line literal/basic strings: `'''` or `"""` not closed on the
+            // same line. The line parser can't read these, and they may contain
+            // newlines the writer can't emit. Refuse (and skip their body so we
+            // don't misread it as more bindings).
+            if (value.hasPrefix("'''") && !isClosedTriple(value, quote: "'''"))
+                || (value.hasPrefix("\"\"\"") && !isClosedTriple(value, quote: "\"\"\"")) {
+                analysis.unrepresentable.append("\(label): multi-line string")
+                idx = skipMultiLine(lines, from: idx, terminator: value.hasPrefix("'''") ? "'''" : "\"\"\"")
+                continue
+            }
+            // Single-line triple-quoted: collapses to a single value but the
+            // line parser below would mis-strip it. Treat as unrepresentable to
+            // stay conservative (these are rare in keybindings anyway).
+            if value.hasPrefix("'''") || value.hasPrefix("\"\"\"") {
+                analysis.unrepresentable.append("\(label): triple-quoted string")
+                continue
+            }
+
+            // Arrays — multi-action bindings. The managed writer wraps a SINGLE
+            // action in single quotes; it cannot represent `['a', 'b']`, and
+            // importing it verbatim would poison every future sync. Refuse.
+            if value.hasPrefix("[") {
+                analysis.unrepresentable.append("\(label): multi-action array")
+                if !value.hasSuffix("]") {
+                    // Open array spanning multiple lines — skip its body.
+                    idx = skipMultiLine(lines, from: idx, terminator: "]")
+                }
+                continue
+            }
+
+            // Single-line quoted scalars. We deliberately reject any extracted
+            // action containing a `'` or newline (e.g. `"exec ... 'Mail'"`)
+            // because the writer single-quotes the action and would throw on
+            // round-trip — better to refuse the import than poison the sync.
             if value.hasPrefix("'"), value.hasSuffix("'"), value.count >= 2 {
-                result.append((key, String(value.dropFirst().dropLast())))
+                let action = String(value.dropFirst().dropLast())
+                appendScalar(key: key, action: action, label: label, into: &analysis)
             } else if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
-                result.append((key, String(value.dropFirst().dropLast())))
-            } else if value.hasPrefix("["), value.hasSuffix("]") {
-                result.append((key, value))
+                // Basic strings may carry escapes (`\"`, `\n`, …). A backslash
+                // means our naive unquoting would produce the wrong action, so
+                // refuse anything with an escape rather than import it wrong.
+                let inner = String(value.dropFirst().dropLast())
+                if inner.contains("\\") {
+                    analysis.unrepresentable.append("\(label): escaped string")
+                } else {
+                    appendScalar(key: key, action: inner, label: label, into: &analysis)
+                }
+            } else {
+                // Bare/unquoted or otherwise unrecognised value form.
+                analysis.unrepresentable.append("\(label): unsupported value form")
             }
         }
-        return result
+        return analysis
+    }
+
+    /// Classify a cleanly-extracted single action: importable unless it carries
+    /// a `'` or newline the managed writer would reject.
+    private static func appendScalar(
+        key: String, action: String, label: String, into analysis: inout BindingImportAnalysis,
+    ) {
+        if action.contains("'") || action.contains("\n") {
+            analysis.unrepresentable.append("\(label): action contains a single quote")
+        } else {
+            analysis.importable.append((key, action))
+        }
+    }
+
+    /// True if a value that starts with the triple-quote also closes it on the
+    /// same (already inline-comment-stripped) line.
+    private static func isClosedTriple(_ value: String, quote: String) -> Bool {
+        value.count > quote.count * 2 && value.hasSuffix(quote)
+    }
+
+    /// Advance past the body of a multi-line construct, returning the index of
+    /// the first line AFTER its terminator (or EOF). `from` is the index of the
+    /// line following the opener.
+    private static func skipMultiLine(_ lines: [String], from: Int, terminator: String) -> Int {
+        var i = from
+        while i < lines.count {
+            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+            i += 1
+            if trimmed.contains(terminator) { break }
+        }
+        return i
     }
 
     /// Drop the user's `[mode.main.binding]` section (header + body up to the

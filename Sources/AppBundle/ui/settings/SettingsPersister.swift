@@ -75,6 +75,20 @@ final class SettingsPersister: ObservableObject {
         }
     }
 
+    /// Edit-driven sync used by every section after mutating the store.
+    /// `immediate` rule (consistent across all sections): one-shot discrete
+    /// actions (toggles, row delete, import) sync now — a half-second lag on a
+    /// single click just feels broken; binding-driven edits that can fire
+    /// rapidly (typing, recording, picker churn) stay debounced. Previously
+    /// each section carried a verbatim copy of this dispatch.
+    func sync(immediate: Bool) {
+        if immediate {
+            syncNow()
+        } else {
+            scheduleSync()
+        }
+    }
+
     /// Immediate sync. Cancels any pending debounce first — the immediate
     /// write already covers whatever that timer was waiting to persist.
     func syncNow() {
@@ -176,6 +190,41 @@ final class SettingsPersister: ObservableObject {
         // THIS run here (success path nils it before falling through).
         if let lastError {
             DiagnosticsLog.shared.log(.sync, "sync error: \(lastError.message)")
+        }
+    }
+}
+
+/// Short-lived inline status line shown in a section footer (duplicate-app
+/// guard, import results, apply confirmation). Replaces the per-section
+/// `notice`/`noticeExpiry`/`showNotice` trio that App Routing and Keybindings
+/// each carried — those had DRIFTED (4 s vs 6 s timeouts, and only one of them
+/// styled "Error" messages red). One helper, one 5 s timeout, one styling rule.
+@MainActor
+final class SettingsNotice: ObservableObject {
+    @Published private(set) var text: String? = nil
+    private var expiry: Task<Void, Never>? = nil
+    private static let timeoutNanoseconds: UInt64 = 5_000_000_000
+
+    /// Show `message` and auto-clear it after the shared timeout. A later
+    /// `show` supersedes an earlier one (the pending clear is cancelled).
+    func show(_ message: String) {
+        text = message
+        expiry?.cancel()
+        expiry = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.timeoutNanoseconds)
+            guard !Task.isCancelled else { return }
+            self?.text = nil
+        }
+    }
+
+    /// Footer text styled by content: messages starting with "Error" render
+    /// red, everything else secondary. (Keybindings did this; App Routing
+    /// didn't — now both do.)
+    @ViewBuilder
+    func view() -> some View {
+        if let text {
+            Text(text)
+                .foregroundStyle(text.hasPrefix("Error") ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
         }
     }
 }

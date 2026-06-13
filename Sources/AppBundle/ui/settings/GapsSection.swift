@@ -7,11 +7,9 @@ import SwiftUI
 struct GapsSection: View {
     @ObservedObject var store: UISettingsStore
     @ObservedObject private var persister = SettingsPersister.shared
-    /// Local mirror of `store.state.gaps` so slider bindings have a non-nil
-    /// anchor while managed; nil = UI keeps hands off the `[gaps]` section.
-    @State private var draft: GapsSettings? = nil
 
-    private var managed: Bool { draft != nil }
+    /// nil `store.state.gaps` = UI keeps hands off the `[gaps]` section.
+    private var managed: Bool { store.state.gaps != nil }
 
     var body: some View {
         Form {
@@ -19,8 +17,8 @@ struct GapsSection: View {
                 Toggle("Manage gaps from this UI", isOn: Binding(
                     get: { managed },
                     set: { newValue in
-                        draft = newValue ? (draft ?? GapsSettings()) : nil
-                        persistDraft()
+                        // Enabling seeds an all-zero block; disabling drops it.
+                        try? store.update { $0.gaps = newValue ? ($0.gaps ?? GapsSettings()) : nil }
                         // One-shot change that adds/removes the whole [gaps]
                         // block — apply right away, no debounce needed.
                         persister.syncNow()
@@ -32,12 +30,15 @@ struct GapsSection: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let bound = draft {
+            if managed {
+                // Bind straight through the store (like CatchAllSection). The
+                // get falls back to an all-zero anchor so the sliders always
+                // have a non-nil value even mid-flip; the set only fires while
+                // `managed`, so it can never resurrect a disabled [gaps] block.
                 let binding = Binding<GapsSettings>(
-                    get: { bound },
+                    get: { store.state.gaps ?? GapsSettings() },
                     set: { newValue in
-                        draft = newValue
-                        persistDraft()
+                        try? store.update { $0.gaps = newValue }
                         // Sliders fire on every tick of a drag; the JSON
                         // sidecar tracks each tick, but rewriting the TOML +
                         // reload-config per tick re-layouts every workspace
@@ -58,17 +59,6 @@ struct GapsSection: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { draft = store.state.gaps }
-        .onChange(of: store.state.gaps) { newValue in
-            // External update wins only if user hasn't been touching the sliders.
-            if draft != newValue { draft = newValue }
-        }
-    }
-
-    /// JSON sidecar saves on every change; the TOML side is the persister's
-    /// job (debounced or immediate, the caller decides).
-    private func persistDraft() {
-        try? store.update { $0.gaps = draft }
     }
 }
 

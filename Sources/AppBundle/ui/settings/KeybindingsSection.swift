@@ -11,12 +11,18 @@ struct KeybindingsSection: View {
     @ObservedObject private var persister = SettingsPersister.shared
     /// Short-lived inline message (import results). Replaces the old
     /// saveStatus label — there is no Save button anymore.
-    @State private var notice: String? = nil
-    @State private var noticeExpiry: Task<Void, Never>? = nil
+    @StateObject private var notice = SettingsNotice()
     /// Confirmation gate for turning the manage-toggle OFF: that nils the
     /// whole bindings list out of the JSON sidecar *and* the TOML, so one
     /// accidental click must not be enough.
     @State private var confirmDisableManaged = false
+    /// P2 (perf): cached result of reading the TOML for an unmanaged
+    /// `[mode.main.binding]` table. The old code read the file from disk inside
+    /// `body`, which re-runs on every keystroke. The answer can only change on
+    /// three events — first appearance, a completed import, and a completed
+    /// sync (which may have written/removed the managed block) — so we refresh
+    /// it then instead of per render.
+    @State private var hasUnmanagedBlock = false
 
     private var managed: Bool { store.state.keybindings != nil }
     private var bindings: [KeybindingRule] { store.state.keybindings ?? [] }
@@ -35,7 +41,7 @@ struct KeybindingsSection: View {
                             // Enabling, or disabling an empty list — nothing
                             // destructive, no confirmation needed.
                             try? store.update { $0.keybindings = newValue ? ($0.keybindings ?? []) : nil }
-                            syncAfterEdit(immediate: true)
+                            persister.sync(immediate: true)
                         } else {
                             // Disabling with rows present destroys the whole
                             // list (sidecar + TOML) — confirm first. The
@@ -49,7 +55,7 @@ struct KeybindingsSection: View {
                 .alert("Disable UI-managed keybindings?", isPresented: $confirmDisableManaged) {
                     Button("Disable", role: .destructive) {
                         try? store.update { $0.keybindings = nil }
-                        syncAfterEdit(immediate: true)
+                        persister.sync(immediate: true)
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: {
@@ -60,7 +66,7 @@ struct KeybindingsSection: View {
                     .foregroundStyle(.secondary)
             }
 
-            if managed, hasUnmanagedBlockInToml() {
+            if managed, hasUnmanagedBlock {
                 Section {
                     VStack(alignment: .leading, spacing: 6) {
                         Label("Existing [mode.main.binding] found in your TOML", systemImage: "info.circle")
@@ -94,6 +100,14 @@ struct KeybindingsSection: View {
             }
         }
         .formStyle(.grouped)
+        // P2: compute the unmanaged-block check off the render path. onAppear
+        // covers first show; the sync-finished refresh (syncing flips back to
+        // false) covers a sync that wrote/removed the managed block; import
+        // refreshes it directly (see importFromConfig).
+        .onAppear { refreshHasUnmanagedBlock() }
+        .onChange(of: persister.syncing) { nowSyncing in
+            if !nowSyncing { refreshHasUnmanagedBlock() }
+        }
     }
 
     private var bindingsSection: some View {
@@ -102,13 +116,22 @@ struct KeybindingsSection: View {
             ForEach(bindings) { rule in
                 let sc = rule.shortcut.trimmingCharacters(in: .whitespaces).lowercased()
                 let isDuplicate = !sc.isEmpty && dupShortcuts.contains(sc)
+                // Highlight any row the writer would refuse: an action with a
+                // `'`/newline (H3) or a workspace target with a space (H2).
+                // These hold the sync just like a duplicate, so the row must
+                // carry the same orange flag — otherwise the held caption names
+                // no culprit.
+                let isUnsafe = SettingsValidity.isUnsafeAction(rule.action)
+                    || SettingsValidity.hasUnsafeWorkspaceParameter(rule)
+                    || SettingsValidity.isUnsafeShortcut(rule.shortcut)
+                let highlighted = isDuplicate || isUnsafe
                 KeybindingRow(
                     shortcut: shortcutBinding(for: rule),
                     action: actionBinding(for: rule),
                     isDuplicate: isDuplicate,
                     onDelete: { removeRule(rule) },
                 )
-                .listRowBackground(isDuplicate ? Color.orange.opacity(0.15) : nil)
+                .listRowBackground(highlighted ? Color.orange.opacity(0.15) : nil)
             }
             if bindings.isEmpty {
                 Text("No bindings yet. Click \u{201C}Add binding\u{201D} below.")
@@ -118,7 +141,7 @@ struct KeybindingsSection: View {
                 try? store.update { $0.keybindings?.append(KeybindingRule(shortcut: "", action: "workspace ")) }
                 // The fresh row is incomplete (empty shortcut), so this
                 // always holds the sync until the user fills it in.
-                syncAfterEdit()
+                persister.sync(immediate: false)
             } label: {
                 Label("Add binding", systemImage: "plus")
             }
@@ -140,9 +163,12 @@ struct KeybindingsSection: View {
                 Label("A row is missing its shortcut or workspace \u{2014} changes are kept but not applied until fixed.", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
             }
-            if let notice {
-                Text(notice)
-                    .foregroundStyle(notice.hasPrefix("Error") ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+            if hasUnsafeRows {
+                Label("A row has an action with a single quote/newline or a workspace name with a space \u{2014} that can\u{2019}t be written to TOML; changes are kept but not applied until fixed.", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            }
+            if notice.text != nil {
+                notice.view()
             } else {
                 SyncStatusFooter(scope: .keybindings)
             }
@@ -164,25 +190,27 @@ struct KeybindingsSection: View {
         bindings.contains { SettingsValidity.isIncompleteKeybinding($0) }
     }
 
-    // MARK: live mutation plumbing
-
-    /// Every edit lands in the store (JSON) first, then the TOML sync runs.
-    /// The validation hold is enforced *inside* the persister (whole-state
-    /// `SettingsValidity` check before every write), not here — per-section
-    /// gating couldn't stop a sync triggered from another section from
-    /// flushing this section's invalid draft into TOML.
-    ///
-    /// `immediate` rule (consistent across all sections): one-shot discrete
-    /// actions (toggles, row delete, import) sync now — a half-second lag on
-    /// a single click just feels broken; binding-driven edits that can fire
-    /// rapidly (typing, recording, picker churn) stay debounced.
-    private func syncAfterEdit(immediate: Bool = false) {
-        if immediate {
-            persister.syncNow()
-        } else {
-            persister.scheduleSync()
+    private var hasUnsafeRows: Bool {
+        bindings.contains {
+            SettingsValidity.isUnsafeAction($0.action)
+                || SettingsValidity.hasUnsafeWorkspaceParameter($0)
+                // Parity with the row-highlight predicate (bindingsSection):
+                // an unsafe shortcut holds the sync and paints its row orange,
+                // so the footer caption must count it too — otherwise a held
+                // sync paints a row but names no culprit.
+                || SettingsValidity.isUnsafeShortcut($0.shortcut)
         }
     }
+
+    // MARK: live mutation plumbing
+
+    // Every edit lands in the store (JSON) first, then the TOML sync runs via
+    // `persister.sync(immediate:)`. The validation hold is enforced *inside*
+    // the persister (whole-state `SettingsValidity` check before every write),
+    // not here — per-section gating couldn't stop a sync triggered from another
+    // section from flushing this section's invalid draft into TOML. Edits that
+    // fire rapidly (typing, recording, picker churn) stay debounced; one-shot
+    // discrete actions (toggles, row delete, import) sync immediately.
 
     private func mutateRule(_ id: UUID, _ change: (inout KeybindingRule) -> Void) {
         try? store.update { state in
@@ -191,7 +219,7 @@ struct KeybindingsSection: View {
             change(&rules[idx])
             state.keybindings = rules
         }
-        syncAfterEdit()
+        persister.sync(immediate: false)
     }
 
     private func shortcutBinding(for rule: KeybindingRule) -> Binding<String> {
@@ -210,27 +238,22 @@ struct KeybindingsSection: View {
 
     private func removeRule(_ rule: KeybindingRule) {
         try? store.update { $0.keybindings?.removeAll { $0.id == rule.id } }
-        syncAfterEdit(immediate: true) // one-shot click — no debounce
-    }
-
-    private func showNotice(_ text: String) {
-        notice = text
-        noticeExpiry?.cancel()
-        noticeExpiry = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 6_000_000_000)
-            guard !Task.isCancelled else { return }
-            notice = nil
-        }
+        persister.sync(immediate: true) // one-shot click — no debounce
     }
 
     // MARK: import flow
 
-    /// Cache-free check: re-reads the TOML each time it's queried so the banner
-    /// disappears immediately after a successful import.
-    private func hasUnmanagedBlockInToml() -> Bool {
+    /// P2: re-read the TOML and cache whether an unmanaged
+    /// `[mode.main.binding]` table is present. Called on the three events that
+    /// can change the answer (onAppear / sync finished / import), never per
+    /// render.
+    private func refreshHasUnmanagedBlock() {
         let url = SettingsConfigPath.aerospaceTomlUrl()
-        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return false }
-        return TomlMarkerWriter.hasUnmanagedBindingSection(in: raw)
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else {
+            hasUnmanagedBlock = false
+            return
+        }
+        hasUnmanagedBlock = TomlMarkerWriter.hasUnmanagedBindingSection(in: raw)
     }
 
     /// Pull every shortcut from the user's raw `[mode.main.binding]` table
@@ -245,50 +268,97 @@ struct KeybindingsSection: View {
         // long as the hold lasts. (The button is disabled too; this guard
         // keeps the invariant even if the view's hold caption is stale.)
         if let reason = SettingsValidity.holdReason(for: store.state) {
-            showNotice("Error: can't import while changes are held (\(reason)) — fix the highlighted rows first.")
+            notice.show("Error: can't import while changes are held (\(reason)) — fix the highlighted rows first.")
             return
         }
         let url = SettingsConfigPath.aerospaceTomlUrl()
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else {
-            showNotice("Error: couldn't read \(url.path)")
+            notice.show("Error: couldn't read \(url.path)")
             return
         }
-        let extracted = TomlMarkerWriter.extractBindingSection(from: raw)
+        let analysis = TomlMarkerWriter.analyzeBindingSection(from: raw)
+        // Refuse the WHOLE import if any binding can't be represented by the
+        // managed writer (multi-action array, multi-line/escaped string, a
+        // value with a single quote, an unparseable line). Importing those
+        // would either silently drop them or poison every future sync — and we
+        // must not strip the user's table to find that out. Name what would be
+        // lost so the user can fix the offending bindings by hand first.
+        if !analysis.unrepresentable.isEmpty {
+            let preview = analysis.unrepresentable.prefix(3).joined(separator: "; ")
+            let more = analysis.unrepresentable.count > 3
+                ? " (+\(analysis.unrepresentable.count - 3) more)" : ""
+            notice.show("Error: can't import — these bindings aren't representable by the UI and would be lost: \(preview)\(more). Edit or remove them in ~/.aerospace.toml first.")
+            return
+        }
+        let extracted = analysis.importable
         if extracted.isEmpty {
-            showNotice("No bindings found in [mode.main.binding] — nothing to import.")
+            notice.show("No bindings found in [mode.main.binding] — nothing to import.")
             return
         }
-        // Drop the original section now so the "duplicate" banner clears, but
-        // KEEP the AEROSPACE-UI markers and everything else.
+        // Build the would-be merged list (deduped by shortcut so a re-import
+        // doesn't double up; normalized the same way duplicate detection is, so
+        // an import can never create a held duplicate).
+        var merged = store.state.keybindings ?? []
+        var existingShortcuts = Set(merged.map { SettingsValidity.normalizedShortcut($0.shortcut) })
+        for (shortcut, action) in extracted {
+            let normalized = SettingsValidity.normalizedShortcut(shortcut)
+            guard !existingShortcuts.contains(normalized) else { continue }
+            existingShortcuts.insert(normalized)
+            merged.append(KeybindingRule(shortcut: shortcut, action: action))
+        }
+        // Confirm the managed block is actually writable BEFORE we strip the
+        // user's table. `generateBlock` runs the same requireSafeLiteral checks
+        // the real sync will — if it throws here, the original table is still
+        // on disk and intact (C1: never strip before the replacement is known
+        // good).
+        var candidate = store.state
+        candidate.keybindings = merged
+        do {
+            _ = try TomlMarkerWriter.generateBlock(from: candidate)
+        } catch {
+            notice.show("Error: import would produce an unwritable config (\(error)); nothing changed.")
+            return
+        }
+        // generateBlock only proves the managed block is *renderable*; the real
+        // sync (writeBlock) ALSO refuses when an unmanaged [gaps] or a second
+        // [mode.main.binding] table exists on disk (TOML can't have two of the
+        // same table). The strip below only removes [mode.main.binding], so an
+        // unmanaged [gaps] survives it: stripping first, then having writeBlock
+        // throw duplicateGapsSection, would leave the disk with no binding table
+        // at all. Run writeBlock's disk-conflict checks here, against the
+        // already-stripped text, and refuse WITHOUT stripping if either trips.
+        let strippedForCheck = TomlMarkerWriter.stripBindingSection(from: raw)
+        if candidate.gaps != nil, TomlMarkerWriter.hasUnmanagedGapsSection(in: strippedForCheck) {
+            notice.show("Error: can't import — your config has a hand-written [gaps] table outside the managed block. Remove or import it first, then retry. Nothing changed.")
+            return
+        }
+        if candidate.keybindings != nil, TomlMarkerWriter.hasUnmanagedBindingSection(in: strippedForCheck) {
+            notice.show("Error: can't import — a second [mode.main.binding] table remains in your config. Remove the extra one first, then retry. Nothing changed.")
+            return
+        }
+        // Safe now: drop the original section (keeping AEROSPACE-UI markers and
+        // everything else) so the "duplicate" banner clears, then commit the
+        // merged list. The follow-up sync writes the marker block.
         let stripped = TomlMarkerWriter.stripBindingSection(from: raw)
         do {
             try stripped.write(to: url, atomically: true, encoding: .utf8)
         } catch {
-            showNotice("Error stripping original section: \(error)")
+            notice.show("Error stripping original section: \(error)")
             return
         }
-        // Append imported rules to the managed list (deduped by shortcut so a
-        // re-import doesn't double up; normalized the same way duplicate
-        // detection is, so an import can never create a held duplicate). The
-        // follow-up sync writes the marker block — no Save click anymore.
-        try? store.update { state in
-            var existing = state.keybindings ?? []
-            var existingShortcuts = Set(existing.map { SettingsValidity.normalizedShortcut($0.shortcut) })
-            for (shortcut, action) in extracted {
-                let normalized = SettingsValidity.normalizedShortcut(shortcut)
-                guard !existingShortcuts.contains(normalized) else { continue }
-                existingShortcuts.insert(normalized)
-                existing.append(KeybindingRule(shortcut: shortcut, action: action))
-            }
-            state.keybindings = existing
-        }
-        syncAfterEdit(immediate: true) // one-shot click — no debounce
+        try? store.update { state in state.keybindings = merged }
+        // P2: the strip above removed the unmanaged table from disk — refresh
+        // the cached banner state directly so it clears immediately (the
+        // sync-finished refresh would also catch it, but this is the
+        // authoritative moment).
+        refreshHasUnmanagedBlock()
+        persister.sync(immediate: true) // one-shot click — no debounce
         // syncNow refreshes the persister hold synchronously, so this reads
         // the post-import verdict: "applying" only when the sync really runs.
         if let reason = persister.holdReason {
-            showNotice("Imported \(extracted.count) binding\(extracted.count == 1 ? "" : "s") — kept but not applied (\(reason)).")
+            notice.show("Imported \(extracted.count) binding\(extracted.count == 1 ? "" : "s") — kept but not applied (\(reason)).")
         } else {
-            showNotice("Imported \(extracted.count) binding\(extracted.count == 1 ? "" : "s") — applying automatically.")
+            notice.show("Imported \(extracted.count) binding\(extracted.count == 1 ? "" : "s") — applying automatically.")
         }
     }
 }
@@ -305,12 +375,12 @@ private struct KeybindingRow: View {
     let onDelete: () -> Void
 
     private var template: KeybindingActionTemplate {
-        // Shared resolution with the validity hold (NOT raw detect): a
-        // parameterised action with an empty argument ("workspace ") must
-        // keep resolving to its workspace template, or the picker bounces to
-        // "Custom (raw action)" the moment the user clears the workspace —
-        // and the two must agree on what counts as an incomplete row.
-        SettingsValidity.template(for: action)
+        // `detect(from:)` handles the empty-argument case itself: a
+        // parameterised action with an empty argument ("workspace ") still
+        // resolves to its workspace template, so the picker doesn't bounce to
+        // "Custom (raw action)" the moment the user clears the workspace — and
+        // the validity hold agrees because it calls the same detect.
+        KeybindingActionTemplate.detect(from: action)
     }
 
     private var parameter: String {

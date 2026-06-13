@@ -14,8 +14,28 @@ import Foundation
 /// `activates = false` keeps focus where the user is; without it the last
 /// launched app would steal focus, which is jarring when the goal is bulk
 /// startup, not "switch me to this one".
+/// MainActor re-entry guard for `launchHomepage`. The three entry points
+/// (startup auto-launch, the `launch-homepage` keybinding command, and the
+/// Settings button) can all fire close together. Each launchHomepage run
+/// `await`s repeatedly (openApplication, settle sleeps, per-rule ⌘N), and the
+/// guards inside `ensureExtraWindowsViaCmdN` read the LIVE window count to
+/// decide how many ⌘N to send — so two interleaved runs each see the other's
+/// not-yet-registered windows as "still missing" and both keep spawning →
+/// overspawn. There's no value in running a second pass concurrently (the
+/// in-flight one already reflects the current routing), so a re-entrant call
+/// simply NO-OPs and lets the running pass finish. The pre-existing `launching`
+/// flag in HomepageSection only debounced the button; this covers all callers.
+@MainActor
+private var launchHomepageInFlight = false
+
 @MainActor
 func launchHomepage(_ state: UIState) async {
+    guard !launchHomepageInFlight else {
+        print("🏠 LaunchHomepage: already in flight — ignoring re-entrant call")
+        return
+    }
+    launchHomepageInFlight = true
+    defer { launchHomepageInFlight = false }
     print("🏠 LaunchHomepage: start, \(state.appRouting.count) rule(s)")
     // Snap any already-open routed apps to their target workspace first
     // (openApplication on an already-running app is a no-op).

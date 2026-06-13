@@ -267,13 +267,17 @@ private func onWindowDetected(_ window: Window) async throws {
     for callback in config.onWindowDetected where try await callback.matches(window) {
         _ = try await callback.run.runCmdSeq(.defaultEnv.copy(\.windowId, window.windowId), .emptyStdin)
         if !callback.checkFurtherCallbacks {
-            HomepageReservation.applyIfNeeded(window) // Phase 3.5: reserved-workspace bump
-            await applySlotPlacement(window)           // Phase 3.6: slot positioning
+            // Upstream treats a matched callback with `check-further-callbacks = false`
+            // as terminal — the user explicitly placed this window via their own TOML
+            // callback. Running the fork's reservation/slot hooks on top would override
+            // that explicit placement (e.g. re-bind a hand-floated window onto the
+            // rule's workspace). Respect the user's callback and stop here. The fork's
+            // placement hooks run only on the fall-through path below.
             return
         }
     }
-    HomepageReservation.applyIfNeeded(window)
-    await applySlotPlacement(window)
+    HomepageReservation.applyIfNeeded(window) // Phase 3.5: reserved-workspace bump
+    await applySlotPlacement(window)           // Phase 3.6: slot positioning
 }
 
 extension WindowDetectedCallback {

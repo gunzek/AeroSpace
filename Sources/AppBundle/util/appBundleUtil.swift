@@ -25,6 +25,9 @@ func initTerminationHandler() {
 
 private struct AppServerTerminationHandler: TerminationHandler {
     func beforeTermination() async throws {
+        // P3: flush any debounced ui-state sidecar write before we exit, so a
+        // pending settings edit isn't lost on signal-driven termination.
+        UISettingsStore.shared.flushNow()
         try await makeAllWindowsVisibleAndRestoreSize()
         await toggleReleaseServerIfDebug(.on)
     }

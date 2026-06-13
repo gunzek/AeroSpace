@@ -27,6 +27,15 @@ import Foundation
 
         checkAccessibilityPermissions()
         startUnixSocketServer()
+        // P3: clean Quit / Cmd-Q goes through NSApplication, not the signal
+        // handler, so flush the debounced ui-state sidecar here too. Synchronous
+        // and idempotent — a no-op if nothing is pending or already flushed by
+        // the signal path.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main,
+        ) { _ in
+            MainActor.assumeIsolated { UISettingsStore.shared.flushNow() }
+        }
         GlobalObserver.initObserver()
         DockClickMonitor.initObserver() // phase 8: Dock-click follow for already-frontmost apps
         Workspace.garbageCollectUnusedWorkspaces() // init workspaces

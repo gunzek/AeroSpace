@@ -25,37 +25,40 @@ func forgetMatcherAssignment(for windowId: UInt32) {
     matcherAssignmentByWindow.removeValue(forKey: windowId)
 }
 
+/// The single source of truth for "where should this window end up". Runs the
+/// FULL two-pass matcher logic (title match, then claim-once title-agnostic)
+/// AND the claim-once `workspaceOverride`/`slotOverride`. Both `applySlotPlacement`
+/// and `reapplyRoutingAndSlotsToAllWindows` resolve through here so they can
+/// never disagree (M5: reapply used to reimplement only pass-1 and then move to
+/// `rule.workspace`, while applySlotPlacement re-resolved to the override and
+/// moved again — a double move + duplicate diagnostics). The title is passed in
+/// so the AX read happens once per window, not twice (P5).
 @MainActor
-func applySlotPlacement(_ window: Window) async {
-    guard let appId = window.app.rawAppBundleId else { return }
-    let state = UISettingsStore.shared.state
-    guard let rule = state.appRouting.first(where: { $0.appId == appId }) else { return }
-    guard rule.layout != .floating else { return }
-
-    // Two-pass matcher resolution:
-    //   1. Title-based matchers (non-empty substring) match by case-insensitive
-    //      window-title contains.
-    //   2. Title-agnostic matchers (empty substring) are claim-once: the first
-    //      one not yet assigned to another window of this app wins, and the
-    //      assignment sticks until the window is destroyed. This is what lets
-    //      a user say "I want 2 Safari windows side-by-side, don't care which
-    //      arrives first" — AeroSpace just feeds incoming windows into the
-    //      next free slot.
-    let rawTitle = (try? await window.title) ?? ""
-    let title = rawTitle.lowercased()
+private func resolveEffectiveTarget(
+    _ window: Window,
+    appId: String,
+    rule: AppRoutingRule,
+    title lowercasedTitle: String,
+) -> (workspace: String, slot: Slot) {
     var effectiveWorkspace = rule.workspace
     var effectiveSlot = rule.slot
     var hit: WindowMatcher? = nil
 
-    // Pass 1: title-based matches
+    // Pass 1: title-based matches (non-empty substring, case-insensitive contains).
     for matcher in rule.windowMatchers {
         let needle = matcher.titleSubstring.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !needle.isEmpty, title.contains(needle) else { continue }
+        guard !needle.isEmpty, lowercasedTitle.contains(needle) else { continue }
         hit = matcher
+        // M1 (stale claim): this window now resolves via a TITLE matcher, so any
+        // arrival-slot claim it held earlier (when it had an empty title) must be
+        // released — otherwise the claim keeps blocking that slot for new windows.
+        matcherAssignmentByWindow.removeValue(forKey: window.windowId)
         break
     }
 
-    // Pass 2: title-agnostic claim-once
+    // Pass 2: title-agnostic claim-once. The first matcher not yet claimed by
+    // another live window of THIS app wins, and the assignment sticks until the
+    // window is destroyed (or, per pass 1, until it resolves by title).
     if hit == nil {
         let titleAgnostic = rule.windowMatchers.filter { $0.titleSubstring.trimmingCharacters(in: .whitespaces).isEmpty }
         if !titleAgnostic.isEmpty {
@@ -89,18 +92,40 @@ func applySlotPlacement(_ window: Window) async {
         if let ws = m.workspaceOverride, !ws.isEmpty { effectiveWorkspace = ws }
         if let s = m.slotOverride { effectiveSlot = s }
     }
+    return (effectiveWorkspace, effectiveSlot)
+}
 
-    // If matcher overrode the workspace and we're not already there, move first.
+@MainActor
+func applySlotPlacement(_ window: Window) async {
+    let rawTitle = (try? await window.title) ?? ""
+    applySlotPlacement(window, title: rawTitle)
+}
+
+/// Synchronous core used once the window title is already known. Sharing this
+/// lets `reapplyRoutingAndSlotsToAllWindows` fetch the title once and thread it
+/// through instead of reading it via AX a second time (P5).
+@MainActor
+func applySlotPlacement(_ window: Window, title rawTitle: String) {
+    guard let appId = window.app.rawAppBundleId else { return }
+    let state = UISettingsStore.shared.state
+    guard let rule = state.appRouting.first(where: { $0.appId == appId }) else { return }
+    guard rule.layout != .floating else { return }
+
+    let (effectiveWorkspace, effectiveSlot) =
+        resolveEffectiveTarget(window, appId: appId, rule: rule, title: rawTitle.lowercased())
+
+    // If the resolved workspace differs from the window's current one, move first.
     var movedWorkspace = false
     if let currentWorkspace = window.nodeWorkspace, currentWorkspace.name != effectiveWorkspace {
         let target = Workspace.get(byName: effectiveWorkspace)
         if window.parent != nil { window.unbindFromParent() }
-        window.bind(to: target.rootTilingContainer, adaptiveWeight: WEIGHT_AUTO, index: INDEX_BIND_LAST)
+        // M2 (force-tile): match upstream `moveWindowToWorkspace` — a floating
+        // window binds to the Workspace node so it stays floating; only tiled
+        // windows go into the root tiling container.
+        let targetContainer: NonLeafTreeNodeObject =
+            window.isFloating ? target : target.rootTilingContainer
+        window.bind(to: targetContainer, adaptiveWeight: WEIGHT_AUTO, index: INDEX_BIND_LAST)
         movedWorkspace = true
-        // Phase 5: pull focus to the matcher's target workspace too.
-        if state.followFocusOnRoute {
-            _ = target.focusWorkspace()
-        }
     }
 
     // Diagnostics (phase 8): this function is hot — it runs for every detected
@@ -115,17 +140,25 @@ func applySlotPlacement(_ window: Window) async {
         }
     }
 
-    guard effectiveSlot != .full else { return }
-    guard let workspace = window.nodeWorkspace, workspace.name == effectiveWorkspace else { return }
-    guard window.parent is TilingContainer else { return }
-
-    if placeWindowInSlot(window, slot: effectiveSlot, workspace: workspace) {
-        placedSlot = effectiveSlot
+    var placedInSlot = false
+    if effectiveSlot != .full,
+       let workspace = window.nodeWorkspace, workspace.name == effectiveWorkspace,
+       window.parent is TilingContainer
+    {
+        if placeWindowInSlot(window, slot: effectiveSlot, workspace: workspace) {
+            placedSlot = effectiveSlot
+            placedInSlot = true
+        }
     }
-    // Phase 5: even if the upstream `--focus-follows-window` flag took us to
-    // the workspace already, repeating focusWorkspace() is safe (idempotent).
-    // Critical when slot placement crossed a workspace boundary above.
-    if state.followFocusOnRoute {
+
+    // H4: only pull focus when something ACTUALLY changed (workspace move or slot
+    // placement). Focusing on a no-op is what teleported the user to a random
+    // workspace during "Apply to open windows" (reapply calls this per window;
+    // the last enumerated window's no-op focus won the race). followFocusOnRoute
+    // is default-ON, so the guard matters.
+    if state.followFocusOnRoute, (movedWorkspace || placedInSlot),
+       let workspace = window.nodeWorkspace
+    {
         _ = workspace.focusWorkspace()
     }
 }
@@ -143,38 +176,17 @@ func reapplyRoutingAndSlotsToAllWindows() async {
     var processed = 0
     for window in MacWindow.allWindows {
         guard let appId = window.app.rawAppBundleId else { continue }
-        guard let rule = state.appRouting.first(where: { $0.appId == appId }) else { continue }
+        guard state.appRouting.contains(where: { $0.appId == appId }) else { continue }
         processed += 1
 
-        // Resolve effective workspace via title match (matcher may override).
+        // M5: delegate the WHOLE move-then-slot to applySlotPlacement. It now owns
+        // the full two-pass resolution (incl. claim-once workspace override) and the
+        // workspace move, so reapply no longer pre-moves to rule.workspace only to
+        // have applySlotPlacement move again to the override (double move + double
+        // diagnostics). P5: fetch the title once here and thread it through, so the
+        // window's AX title is read exactly once per window.
         let rawTitle = (try? await window.title) ?? ""
-        let title = rawTitle.lowercased()
-        var effectiveWorkspace = rule.workspace
-        for matcher in rule.windowMatchers {
-            let needle = matcher.titleSubstring.trimmingCharacters(in: .whitespaces).lowercased()
-            guard !needle.isEmpty, title.contains(needle) else { continue }
-            if let ws = matcher.workspaceOverride, !ws.isEmpty { effectiveWorkspace = ws }
-            break
-        }
-
-        // 1. Move to the resolved workspace if not already there.
-        if let currentWorkspace = window.nodeWorkspace, currentWorkspace.name != effectiveWorkspace {
-            let targetWorkspace = Workspace.get(byName: effectiveWorkspace)
-            if window.parent != nil { window.unbindFromParent() }
-            if rule.layout == .floating {
-                window.bind(to: targetWorkspace, adaptiveWeight: WEIGHT_AUTO, index: INDEX_BIND_LAST)
-            } else {
-                window.bind(to: targetWorkspace.rootTilingContainer, adaptiveWeight: WEIGHT_AUTO, index: INDEX_BIND_LAST)
-            }
-            // Diagnostics: this move happens before applySlotPlacement runs
-            // (which then sees the window already on the right workspace and
-            // stays silent about it), so log it here. A window that also gets
-            // slot-placed below produces a second line — both are real moves.
-            logRoutingPlacement(window, title: rawTitle, appId: appId, workspace: effectiveWorkspace, slot: nil)
-        }
-
-        // 2. Apply slot placement (which itself re-resolves matchers).
-        await applySlotPlacement(window)
+        applySlotPlacement(window, title: rawTitle)
     }
     DiagnosticsLog.shared.log(.routing, "reapplied routing to \(processed) windows")
 }

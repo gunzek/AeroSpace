@@ -32,9 +32,23 @@ fi
 echo "→ remote rebuild + install (kills and restarts AeroSpace there)"
 # Full remote log lands in /tmp/deploy-macbook.log; show the interesting tail.
 # Unlock the keychain first so codesign can use the aerospace-dev identity in
-# this non-interactive session (password read from credentials.md by hand —
-# do NOT hardcode it here; ssh-agent style prompt-free unlock).
-ssh -o BatchMode=yes "$HOST" "cd $REMOTE_DIR && git log --oneline -1 && security unlock-keychain -p \"\$(cat ~/.aerospace-keychain-pass 2>/dev/null)\" ~/Library/Keychains/login.keychain-db 2>/dev/null; ./rebuild-and-install.sh" > /tmp/deploy-macbook.log 2>&1 || {
+# this non-interactive session.
+#
+# Keychain password OFF argv: the old form `security unlock-keychain -p "$(cat
+# …)"` put the login-keychain password into the process's argv → visible to any
+# user via `ps` on the MacBook for the unlock's lifetime. Instead we feed it on
+# stdin: `security unlock-keychain` with no -p reads the passphrase from stdin
+# when there's no tty (this ssh session has none), so the secret never reaches
+# any argv. `cat`'s argv only shows the filename, not the contents.
+# We also enforce the pass-file is owner-only (chmod 600) before use.
+#
+# Residual risk: none on argv now. The password is still briefly in the remote
+# shell's pipe; that's not observable via `ps`. If `security` ever changes to
+# require a tty we'd fall back to interactive — acceptable for a manual deploy.
+ssh -o BatchMode=yes "$HOST" "cd $REMOTE_DIR && git log --oneline -1 && \
+    chmod 600 ~/.aerospace-keychain-pass 2>/dev/null; \
+    cat ~/.aerospace-keychain-pass 2>/dev/null | security unlock-keychain ~/Library/Keychains/login.keychain-db 2>/dev/null; \
+    ./rebuild-and-install.sh" > /tmp/deploy-macbook.log 2>&1 || {
     echo "❌ remote rebuild+install failed — full log:"
     tail -30 /tmp/deploy-macbook.log
     exit 1

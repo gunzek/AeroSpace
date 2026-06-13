@@ -9,8 +9,10 @@ import Common
 ///      workspace; reservation must not override the user's explicit pin)
 ///   3. The window currently lives on a *reserved* workspace — defined as a
 ///      workspace that has at least one routing rule pointing to it
-///   4. The reserved workspace already holds `> workspaceLimit` windows (after
-///      this new arrival)
+///   4. The reserved workspace would hold more than `workspaceLimit` windows
+///      counting this new arrival (tiled + floating). `workspaceLimit` is read
+///      as "at most N windows on a reserved workspace", so the (N+1)-th arrival
+///      is bumped — see the `>` check below.
 ///   5. `catchAllWorkspaces` is non-empty
 ///
 /// If all hold, the window is unbound from its current parent and rebound to
@@ -40,17 +42,31 @@ enum HomepageReservation {
         // one routing rule). Otherwise it's "scratch" and unrouted apps belong here.
         let isReserved = state.appRouting.contains { $0.workspace == workspaceName }
         guard isReserved else { return }
-        // Rule 4: capacity. We compare against the configured limit; equality means
-        // "limit just reached" → bump.
+        // Rule 4: capacity. Count BOTH tiled leaves and floating windows — floating
+        // windows are bound directly to the Workspace node, not into
+        // rootTilingContainer, so counting only tiling leaves would let a workspace
+        // full of floating windows never bump. This arrival is ALREADY bound to the
+        // workspace and thus included in `windowCount`. `workspaceLimit` means "at
+        // most N windows stay", so the N-th arrival keeps it at N (no bump) and only
+        // the (N+1)-th arrival — which pushes the count to N+1 — is moved on. Hence
+        // strict `>`: count==N is fine, count>N bumps.
         let windowCount = workspace.rootTilingContainer.allLeafWindowsRecursive.count
+            + workspace.floatingWindows.count
         guard windowCount > state.catchAll.workspaceLimit else { return }
 
         let target = candidates[cursor % candidates.count]
         cursor &+= 1
         let targetWorkspace = Workspace.get(byName: target)
         window.unbindFromParent()
+        // Match upstream `moveWindowToWorkspace`: a floating window binds to the
+        // Workspace node (preserving its floating state), a tiled window to the
+        // root tiling container. Force-tiling a deliberately-floating window here
+        // would be a regression.
+        let targetContainer: NonLeafTreeNodeObject = window.isFloating
+            ? targetWorkspace
+            : targetWorkspace.rootTilingContainer
         window.bind(
-            to: targetWorkspace.rootTilingContainer,
+            to: targetContainer,
             adaptiveWeight: WEIGHT_AUTO,
             index: INDEX_BIND_LAST,
         )

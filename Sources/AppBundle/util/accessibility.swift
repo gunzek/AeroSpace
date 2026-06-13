@@ -1,6 +1,9 @@
 import AppKit
 import Common
+import os
 import PrivateApi
+
+private let accessibilityLog = Logger(subsystem: aeroSpaceAppId, category: "accessibility")
 
 @MainActor
 func checkAccessibilityPermissions() {
@@ -15,8 +18,48 @@ func checkAccessibilityPermissions() {
         // in System Settings → Privacy & Security → Accessibility, which
         // re-evaluates against the new binary hash. Quitting still happens
         // because AeroSpace needs the permission to do anything useful.
+        //
+        // BUT: terminating with no explanation makes the app look like it
+        // silently crashed on launch (hit Honza on 2026-06-12). So before we
+        // quit, log it AND tell the user what to do — show a modal NSAlert
+        // whose default button opens the Accessibility pane directly. We do
+        // NOT re-add `tccutil reset` (see the rationale above).
+        accessibilityLog.error("AeroSpace is not trusted for Accessibility; cannot run. Prompting user, then terminating.")
+        showAccessibilityPermissionAlert()
         terminateApp()
     }
+}
+
+/// Modal alert shown on the not-trusted startup path, just before quitting.
+/// Explains the off/on toggle dance (the fork's rebuilds change the binary
+/// hash, so a stale grant must be re-evaluated) and opens the Accessibility
+/// pane so the user lands in the right place.
+@MainActor
+private func showAccessibilityPermissionAlert() {
+    let accessibilityPaneUrl = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    // Always open the pane, even if (somehow) the alert can't be presented —
+    // that way the user at least lands in the right place.
+    defer {
+        if let url = URL(string: accessibilityPaneUrl) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+    let alert = NSAlert()
+    alert.alertStyle = .critical
+    alert.messageText = "AeroSpace needs Accessibility permission"
+    alert.informativeText = """
+        AeroSpace can't manage your windows without Accessibility access.
+
+        Open System Settings › Privacy & Security › Accessibility, toggle \
+        AeroSpace OFF and then ON again (a rebuilt copy needs to be \
+        re-approved), then relaunch AeroSpace.
+        """
+    alert.addButton(withTitle: "Open Accessibility Settings")
+    alert.addButton(withTitle: "Quit")
+    // Bring our (about-to-quit) app forward so the modal alert is visible
+    // rather than buried behind whatever currently has focus.
+    NSApp.activate(ignoringOtherApps: true)
+    _ = alert.runModal()
 }
 
 protocol ReadableAttr: Sendable {

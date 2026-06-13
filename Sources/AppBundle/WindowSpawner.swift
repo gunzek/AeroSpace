@@ -58,6 +58,18 @@ func ensureExtraWindowsViaCmdN(rule: AppRoutingRule) async {
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
 
+        // Final re-check immediately before posting: the activate+sleep above
+        // is best-effort, and during a parallel launchHomepage another app can
+        // still grab focus in the window between the check and the post. ⌘N is
+        // a global synthetic keystroke — if it lands in the wrong app it opens
+        // a stray window there. So if we're STILL not frontmost, skip posting
+        // this attempt entirely (the bounded retry loop tries again next pass).
+        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == rule.appId else {
+            print("ensureExtraWindowsViaCmdN[\(rule.displayName)]: not frontmost at post time (attempt \(attempts)), skipping ⌘N")
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            continue
+        }
+
         let source = CGEventSource(stateID: .hidSystemState)
         let nKeyCode: CGKeyCode = 0x2D
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: nKeyCode, keyDown: true),
@@ -78,16 +90,4 @@ func ensureExtraWindowsViaCmdN(rule: AppRoutingRule) async {
 
     let finalCount = MacWindow.allWindows.count { $0.app.rawAppBundleId == rule.appId }
     print("ensureExtraWindowsViaCmdN[\(rule.displayName)]: gave up after \(maxAttempts) attempts, have \(finalCount)/\(target)")
-}
-
-/// Walk every routing rule and ensure each routed app has at least as many
-/// windows as it has slots. Used by Launch Homepage and by an explicit UI
-/// button so Honza can manually re-trigger the spawn dance when the system
-/// drifted (e.g. macOS quit Finder during sleep).
-@MainActor
-func ensureExtraWindowsForAllRoutedApps() async {
-    let state = UISettingsStore.shared.state
-    for rule in state.appRouting {
-        await ensureExtraWindowsViaCmdN(rule: rule)
-    }
 }

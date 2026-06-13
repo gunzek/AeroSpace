@@ -258,9 +258,15 @@ final class TomlMarkerWriterTest: XCTestCase {
     // MARK: Phase 3.6 — Slot overlap
 
     func testSlotOverlapSelf() {
-        for slot in Slot.allCases {
+        // Every positioned slot overlaps itself. `.full` is the exception: it is
+        // the "no slot constraint" sentinel (placement no-op), so it never
+        // conflicts — not even with another `.full`. Two default `.full` rules on
+        // one workspace are a normal config; if `.full` overlapped itself, that
+        // case would hold ALL TOML sync forever (H1).
+        for slot in Slot.allCases where slot != .full {
             XCTAssertTrue(slot.overlaps(slot), "\(slot) should overlap itself")
         }
+        XCTAssertFalse(Slot.full.overlaps(.full), ".full must not overlap itself (H1)")
     }
 
     func testSlotOverlapHalfContainsQuadrants() {
@@ -278,10 +284,13 @@ final class TomlMarkerWriterTest: XCTestCase {
     }
 
     func testSlotFullDoesNotOverlapOtherSlots() {
-        // .full is "no constraint"; treating it as overlapping everything would
-        // make Save unworkable. We only overlap-check between non-full slots in
-        // practice; verify the symmetry assumption holds at least for self.
-        XCTAssertTrue(Slot.full.overlaps(.full))
+        // `.full` is "no slot constraint" — its placement is a runtime no-op, so
+        // it never claims a region and never conflicts with ANY slot, including
+        // another `.full`. `routingConflicts` calls overlaps() on every
+        // same-workspace pair (the default `.full` rules included), so a
+        // `.full`/`.full` "conflict" would hold all TOML sync on a perfectly
+        // normal config (H1). Must be false in every combination.
+        XCTAssertFalse(Slot.full.overlaps(.full))
         XCTAssertFalse(Slot.full.overlaps(.leftHalf))
         XCTAssertFalse(Slot.leftHalf.overlaps(.full))
     }

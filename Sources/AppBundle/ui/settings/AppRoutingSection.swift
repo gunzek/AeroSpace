@@ -12,12 +12,16 @@ struct AppRoutingSection: View {
     @ObservedObject private var persister = SettingsPersister.shared
     /// Short-lived inline message (duplicate-app guard, apply confirmation).
     /// Replaces the old saveStatus label — there is no Save button anymore.
-    @State private var notice: String? = nil
-    @State private var noticeExpiry: Task<Void, Never>? = nil
+    @StateObject private var notice = SettingsNotice()
     @State private var applying = false
 
     var body: some View {
-        Form {
+        // P4 (perf): compute the O(n²) conflict map ONCE per render into a
+        // local, instead of re-evaluating the `conflictsByRule` computed
+        // property ~2× per row + once in the footer (→ O(n³) per keystroke).
+        // Indexed by rule id below; the footer reads emptiness off the same map.
+        let conflicts = SettingsValidity.routingConflicts(in: store.state.appRouting)
+        return Form {
             // Phase 5 + 6c: two global focus-follow toggles. Saved into the
             // JSON sidecar live. followFocusOnRoute also changes the TOML
             // output (it adds the --focus-follows-window flag to every
@@ -31,7 +35,7 @@ struct AppRoutingSection: View {
                         try? store.update { $0.followFocusOnRoute = newValue }
                         // TOML carries this flag — sync it through. One-shot
                         // toggle, so immediately (same rule as everywhere).
-                        syncAfterEdit(immediate: true)
+                        persister.sync(immediate: true)
                     },
                 ))
                 .toggleStyle(.switch)
@@ -56,11 +60,11 @@ struct AppRoutingSection: View {
                 ForEach(store.state.appRouting) { rule in
                     AppRoutingRow(
                         rule: ruleBinding(for: rule),
-                        conflictsWith: conflictsByRule[rule.id] ?? [],
+                        conflictsWith: conflicts[rule.id] ?? [],
                         onDelete: { remove(rule) },
                     )
                     .listRowBackground(
-                        (conflictsByRule[rule.id] ?? []).isEmpty ? nil : Color.orange.opacity(0.15),
+                        (conflicts[rule.id] ?? []).isEmpty ? nil : Color.orange.opacity(0.15),
                     )
                 }
                 if store.state.appRouting.isEmpty {
@@ -81,14 +85,14 @@ struct AppRoutingSection: View {
             } header: {
                 Text("Rules")
             } footer: {
-                statusFooter
+                statusFooter(hasConflicts: !conflicts.isEmpty)
             }
         }
         .formStyle(.grouped)
     }
 
     @ViewBuilder
-    private var statusFooter: some View {
+    private func statusFooter(hasConflicts: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             if hasConflicts {
                 Label("Slot conflict between the highlighted rules \u{2014} changes are kept but not applied until fixed.", systemImage: "exclamationmark.triangle.fill")
@@ -101,9 +105,8 @@ struct AppRoutingSection: View {
             if applying {
                 Text("Applying to open windows\u{2026}")
                     .foregroundStyle(.secondary)
-            } else if let notice {
-                Text(notice)
-                    .foregroundStyle(.secondary)
+            } else if notice.text != nil {
+                notice.view()
             } else {
                 SyncStatusFooter()
             }
@@ -121,31 +124,15 @@ struct AppRoutingSection: View {
         store.state.appRouting.contains { SettingsValidity.isInvalidRoutingRule($0) }
     }
 
-    private var conflictsByRule: [UUID: [String]] {
-        SettingsValidity.routingConflicts(in: store.state.appRouting)
-    }
-
-    private var hasConflicts: Bool { !conflictsByRule.isEmpty }
-
     // MARK: live mutation plumbing
 
-    /// Every row edit lands in the store (JSON) first, then the TOML sync is
-    /// scheduled. The validation hold is enforced *inside* the persister
-    /// (whole-state `SettingsValidity` check before every write), not here —
-    /// per-section gating couldn't stop a sync triggered from another section
-    /// from flushing this section's invalid draft into TOML.
-    ///
-    /// `immediate` rule (consistent across all sections): one-shot discrete
-    /// actions (toggles, row delete) sync now — a half-second lag on a single
-    /// click just feels broken; row-binding edits stay debounced because the
-    /// same binding also carries typed workspace text.
-    private func syncAfterEdit(immediate: Bool = false) {
-        if immediate {
-            persister.syncNow()
-        } else {
-            persister.scheduleSync()
-        }
-    }
+    // Every edit lands in the store (JSON) first, then the TOML sync runs via
+    // `persister.sync(immediate:)`. The validation hold is enforced *inside*
+    // the persister (whole-state `SettingsValidity` check before every write),
+    // not here — per-section gating couldn't stop a sync triggered from another
+    // section from flushing this section's invalid draft into TOML. Row-binding
+    // edits stay debounced (the same binding carries typed workspace text);
+    // one-shot clicks sync immediately.
 
     private func ruleBinding(for rule: AppRoutingRule) -> Binding<AppRoutingRule> {
         Binding(
@@ -155,14 +142,14 @@ struct AppRoutingSection: View {
                     guard let idx = state.appRouting.firstIndex(where: { $0.id == rule.id }) else { return }
                     state.appRouting[idx] = newValue
                 }
-                syncAfterEdit()
+                persister.sync(immediate: false)
             },
         )
     }
 
     private func remove(_ rule: AppRoutingRule) {
         try? store.update { $0.appRouting.removeAll { $0.id == rule.id } }
-        syncAfterEdit(immediate: true) // one-shot click — no debounce
+        persister.sync(immediate: true) // one-shot click — no debounce
     }
 
     private func addAppFromPicker() {
@@ -180,7 +167,7 @@ struct AppRoutingSection: View {
         let displayName = (bundle?.infoDictionary?["CFBundleName"] as? String)
             ?? url.deletingPathExtension().lastPathComponent
         if store.state.appRouting.contains(where: { $0.appId == id }) {
-            showNotice("\(displayName) is already in the list.")
+            notice.show("\(displayName) is already in the list.")
             return
         }
         let rule = AppRoutingRule(
@@ -192,7 +179,7 @@ struct AppRoutingSection: View {
         try? store.update { $0.appRouting.append(rule) }
         // The fresh rule has an empty workspace, so this always holds the
         // sync — exactly right: the footer prompts the user to fill it in.
-        syncAfterEdit()
+        persister.sync(immediate: false)
     }
 
     private func applyNow() {
@@ -210,17 +197,7 @@ struct AppRoutingSection: View {
                 await reapplyRoutingAndSlotsToAllWindows()
             }
             applying = false
-            showNotice("Applied to open windows.")
-        }
-    }
-
-    private func showNotice(_ text: String) {
-        notice = text
-        noticeExpiry?.cancel()
-        noticeExpiry = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
-            guard !Task.isCancelled else { return }
-            notice = nil
+            notice.show("Applied to open windows.")
         }
     }
 }
@@ -296,10 +273,23 @@ private struct AppRoutingRow: View {
         .padding(.vertical, 2)
     }
 
+    /// P4 (perf): cache the per-app icon by path. `NSWorkspace.icon(forFile:)`
+    /// is a non-trivial lookup and was being called per row on every render
+    /// (i.e. per keystroke anywhere in the section). Icons don't change during
+    /// a session, so a process-wide cache is safe. @MainActor-isolated (the
+    /// view is), so the unsynchronised static dictionary is single-threaded.
+    @MainActor private static var iconCache: [String: NSImage] = [:]
+    private static func cachedIcon(forPath path: String) -> NSImage {
+        if let cached = iconCache[path] { return cached }
+        let icon = NSWorkspace.shared.icon(forFile: path)
+        iconCache[path] = icon
+        return icon
+    }
+
     @ViewBuilder
     private var appIcon: some View {
         if let path = rule.appPath {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+            Image(nsImage: Self.cachedIcon(forPath: path))
                 .resizable()
                 .interpolation(.high)
         } else {

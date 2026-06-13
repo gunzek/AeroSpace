@@ -41,27 +41,10 @@ enum SettingsValidity {
     /// written verbatim and break reload-config.
     static func isIncompleteKeybinding(_ rule: KeybindingRule) -> Bool {
         if rule.shortcut.trimmingCharacters(in: .whitespaces).isEmpty { return true }
-        let template = template(for: rule.action)
+        let template = KeybindingActionTemplate.detect(from: rule.action)
         return template.requiresParameter
             && KeybindingActionTemplate.parameter(from: rule.action, given: template)
                 .trimmingCharacters(in: .whitespaces).isEmpty
-    }
-
-    /// Template detection that survives a missing parameter. `detect(from:)`
-    /// trims before its prefix checks, so a parameterised action whose
-    /// argument is still empty ("workspace " — exactly what "Add binding"
-    /// creates and what clearing the workspace combo produces) trims to
-    /// "workspace", misses the `"workspace "` prefix check, and falls through
-    /// to `.custom`. That bounced the row's picker to "Custom (raw action)"
-    /// mid-edit AND slipped past the incomplete-row hold (`.custom` requires
-    /// no parameter), letting an argument-less `'workspace'` action reach the
-    /// TOML and break reload-config. Map the bare command words back to their
-    /// parameterised templates before falling back to detect.
-    static func template(for action: String) -> KeybindingActionTemplate {
-        let trimmed = action.trimmingCharacters(in: .whitespaces)
-        if trimmed == KeybindingActionTemplate.workspaceSwitch.rawValue { return .workspaceSwitch }
-        if trimmed == KeybindingActionTemplate.workspaceMoveTo.rawValue { return .workspaceMoveTo }
-        return KeybindingActionTemplate.detect(from: action)
     }
 
     /// TomlMarkerWriter writes the shortcut as a bare TOML key
@@ -81,14 +64,64 @@ enum SettingsValidity {
     private static let tomlBareKeyScalars =
         CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
 
+    /// TomlMarkerWriter writes the action as a single-quoted TOML literal
+    /// (`alt-q = 'workspace q'`) and runs it through `requireSafeLiteral`, which
+    /// HARD-throws on a `'` or newline. Without this check that throw happened
+    /// only at write time → a post-write `.general` sync error that blocked
+    /// every section with no culprit row highlighted (H3). Mirror the writer's
+    /// rule here so an unsafe action is a HELD state with its row highlighted,
+    /// exactly like a duplicate/incomplete shortcut. The validity layer must
+    /// never let the writer's safety check be the FIRST place a bad value is
+    /// caught.
+    static func isUnsafeAction(_ action: String) -> Bool {
+        action.contains("'") || action.contains("\n")
+    }
+
+    /// The workspace parameter embedded in a `workspace <ws>` /
+    /// `move-node-to-workspace <ws>` keybinding action is interpolated unquoted
+    /// into the command token, so it has the same constraints as a routing
+    /// workspace (no interior whitespace, no `'`). `isUnsafeAction` already
+    /// catches the `'`; this adds the interior-whitespace token-break case that
+    /// a quote-free action would otherwise sneak past (H2 via keybindings).
+    static func hasUnsafeWorkspaceParameter(_ rule: KeybindingRule) -> Bool {
+        let template = KeybindingActionTemplate.detect(from: rule.action)
+        guard template.requiresParameter else { return false }
+        let param = KeybindingActionTemplate.parameter(from: rule.action, given: template)
+        return isUnsafeWorkspaceName(param)
+    }
+
+    // MARK: workspace name (shared by routing + keybinding workspace params)
+
+    /// A workspace name is unsafe when it can't survive the round-trip into the
+    /// managed TOML. Both writers interpolate it UNQUOTED into a command token:
+    /// `move-node-to-workspace <ws>` (routing) and `workspace <ws>` /
+    /// `move-node-to-workspace <ws>` (keybinding actions). The whole command is
+    /// then wrapped in a single-quoted TOML literal and split back into argv on
+    /// whitespace by AeroSpace's command parser. So:
+    ///   - a `'` or newline breaks the surrounding TOML literal (unsafeLiteral);
+    ///   - ANY interior whitespace (space, tab, …) makes the command token split
+    ///     into extra argv entries → "too many arguments" → reload-config rejects
+    ///     the whole config and falls back to defaults (H2).
+    /// The empty check stays the caller's job (it distinguishes an in-progress
+    /// row from a genuinely bad one), so this only flags non-empty-but-broken.
+    static func isUnsafeWorkspaceName(_ workspace: String) -> Bool {
+        let ws = workspace.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ws.isEmpty else { return false } // empty handled separately
+        if ws.contains("'") { return true }
+        // Interior whitespace (after trimming the ends) breaks the bare token.
+        return ws.unicodeScalars.contains { CharacterSet.whitespacesAndNewlines.contains($0) }
+    }
+
     // MARK: app routing
 
-    /// A routing rule is invalid while its workspace is empty or any literal
+    /// A routing rule is invalid while its workspace is empty, contains a single
+    /// quote, or contains interior whitespace (any of which corrupts the
+    /// unquoted `move-node-to-workspace <ws>` command token), or its appId
     /// contains a single quote (TomlMarkerWriter writes single-quoted TOML
     /// literals, so a `'` would break the file).
     static func isInvalidRoutingRule(_ rule: AppRoutingRule) -> Bool {
         rule.workspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || rule.workspace.contains("'")
+            || isUnsafeWorkspaceName(rule.workspace)
             || rule.appId.contains("'")
     }
 
@@ -127,6 +160,15 @@ enum SettingsValidity {
         }
         if bindings.contains(where: { isUnsafeShortcut($0.shortcut) }) {
             return "a keybinding shortcut contains characters that can't be written to TOML"
+        }
+        // Action `'`/newline (H3) — held with the row highlighted instead of a
+        // post-write hard error from requireSafeLiteral.
+        if bindings.contains(where: { isUnsafeAction($0.action) }) {
+            return "a keybinding action contains a single quote or newline that can't be written to TOML"
+        }
+        // Workspace parameter with interior whitespace (H2 via keybindings).
+        if bindings.contains(where: hasUnsafeWorkspaceParameter) {
+            return "a keybinding targets a workspace name with a space (breaks the command)"
         }
         if state.appRouting.contains(where: isInvalidRoutingRule) {
             return "an App Routing rule has an empty or invalid workspace"

@@ -40,20 +40,97 @@ enum DockClickMonitor {
     ///      hit through some exotic overlay is harmless.)
     /// 0.1 s is plenty for the Dock — if the lookup times out it was not a
     /// Dock click worth acting on.
+    ///
+    /// P1 (perf): the Dock pid is now cached via NSWorkspace launch/terminate
+    /// notifications instead of calling `runningApplications(...)` on EVERY
+    /// click. That lookup is a synchronous IPC, and the .leftMouseUp handler
+    /// fires for every system-wide left click — so it must never run per click
+    /// on the common (non-Dock) path. The cache is invalidated when the Dock
+    /// process terminates (crash / `killall Dock`) and lazily re-resolved on
+    /// the next click that survives the geometric prefilter.
     private static var cachedDock: (pid: pid_t, element: AXUIElement)?
+
+    /// Look up the Dock pid. Resolved lazily and cached until the Dock dies;
+    /// the NSWorkspace.didTerminateApplicationNotification observer (initObserver)
+    /// drops the cache so a restarted Dock gets a fresh element.
     private static func dockAppElement() -> AXUIElement? {
+        if let cachedDock {
+            // The didTerminate observer normally drops the cache when the Dock
+            // dies, but notification delivery can lag a restart; verify the
+            // cached pid is still live before trusting its element so a brief
+            // stale-pid window (during a Dock restart) can't make us hit-test a
+            // dead process. Cheap: this runs only on clicks that survived the
+            // geometric prefilter (near a screen edge), not on every click.
+            if NSRunningApplication(processIdentifier: cachedDock.pid) != nil {
+                return cachedDock.element
+            }
+            self.cachedDock = nil
+        }
         guard let pid = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock")
             .first?.processIdentifier else { return nil }
-        if let cachedDock, cachedDock.pid == pid { return cachedDock.element }
         let element = AXUIElementCreateApplication(pid)
         _ = AXUIElementSetMessagingTimeout(element, 0.1)
         cachedDock = (pid, element)
         return element
     }
 
+    /// Geometric pre-filter: the Dock occupies one screen edge (bottom / left /
+    /// right), which is exactly the strip a screen's `frame` covers but its
+    /// `visibleFrame` doesn't. Comparing the two per screen yields the Dock's
+    /// band without any AX call; a click outside every band can't be on the
+    /// Dock, so we skip the expensive AX hit-test (the overwhelmingly common
+    /// case — almost every click lands inside a window, far from the edge).
+    ///
+    /// `point` is in Cocoa screen coordinates (bottom-left origin), the same as
+    /// `NSScreen.frame`/`visibleFrame`, so no flip here. We widen each band by a
+    /// margin to stay robust against rounding and the Dock's hover-magnification
+    /// (icons grow past the resting band). When the Dock is hidden (auto-hide),
+    /// frame==visibleFrame so no band exists — but a hidden Dock reveals on
+    /// hover and the reveal still sits at the edge, so we also always allow a
+    /// thin strip along each screen's outer edges as a fallback.
+    private static func mightBeOnDock(cocoaScreenPoint point: CGPoint) -> Bool {
+        // 80px, not a tight ~24px: when Dock magnification is on, a hovered icon
+        // grows toward `largesize` (up to 128px) and its TOP edge rises well
+        // past the resting band — a click there would otherwise be pre-filtered
+        // out and silently miss the dock-follow. This prefilter is only a cheap
+        // gate before the authoritative AX hit-test (which has no false
+        // positives), so a generous band costs at most an occasional extra AX
+        // call for a near-edge click and can never cause a false dock-follow.
+        let margin: CGFloat = 80
+        for screen in NSScreen.screens {
+            let frame = screen.frame
+            guard frame.contains(point) else { continue }
+            let visible = screen.visibleFrame
+            // Bottom band: visible bottom sits above the frame bottom.
+            if visible.minY - frame.minY > 1, point.y <= visible.minY + margin { return true }
+            // Left band: visible left sits right of the frame left.
+            if visible.minX - frame.minX > 1, point.x <= visible.minX + margin { return true }
+            // Right band: visible right sits left of the frame right.
+            if frame.maxX - visible.maxX > 1, point.x >= visible.maxX - margin { return true }
+            // Auto-hidden Dock (no inset): allow a thin reveal strip on the
+            // bottom/left/right outer edges so a click on the just-revealed
+            // Dock still gets hit-tested.
+            if point.y <= frame.minY + margin { return true }
+            if point.x <= frame.minX + margin { return true }
+            if point.x >= frame.maxX - margin { return true }
+        }
+        return false
+    }
+
     static func initObserver() {
         if installed { return }
         installed = true
+        // P1: drop the cached Dock element when the Dock process dies, so a
+        // restarted Dock (crash / `killall Dock`) gets a fresh element instead
+        // of a stale one that errors forever. Matches the NSWorkspace observer
+        // pattern in GlobalObserver.initObserver.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main,
+        ) { note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier == "com.apple.dock" else { return }
+            MainActor.assumeIsolated { cachedDock = nil }
+        }
         // Global monitor (not CGEventTap): observes clicks delivered to OTHER
         // apps — the Dock — and is covered by the already-granted
         // Accessibility permission. No Input Monitoring permission involved.
@@ -77,6 +154,11 @@ enum DockClickMonitor {
         // on the system, so the common path must stay near-free.
         if !TrayMenuModel.shared.isEnabled { return }
         if !UISettingsStore.shared.state.followAppOnDockClick { return }
+        // P1: geometric pre-filter BEFORE any AX call. The Dock lives on a
+        // screen edge; a click nowhere near an edge can't be on it, so skip the
+        // synchronous AX hit-test IPC entirely — that's the common path for
+        // nearly every click on screen.
+        if !mightBeOnDock(cocoaScreenPoint: cocoaScreenPoint) { return }
         guard let bundleId = dockAppBundleId(atCocoaScreenPoint: cocoaScreenPoint) else {
             // Not a Dock app-icon click (regular window, desktop, trash,
             // folder, separator, minimized-window item, AX error, ...).
