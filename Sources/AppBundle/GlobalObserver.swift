@@ -116,7 +116,21 @@ enum GlobalObserver {
         defer { dockClickFollowGuard = false }
         do {
             try await runLightSession(refreshEvent, token) {
-                _ = targetWorkspace.focusWorkspace()
+                // Focus the *clicked app's* window, not just its workspace.
+                // focusWorkspace() resolves to the workspace's MRU window via
+                // toLiveFocus(), which is rarely the app the user just clicked
+                // in the Dock — so the wrong window was raised and the click
+                // appeared to do nothing until a second click. Targeting the
+                // window makes runLightSession's syncFocusToMacOs raise the
+                // right one (focusWindow() also switches to its workspace);
+                // nativeFocus() then guarantees the AX raise + app activation
+                // (same belt-and-suspenders pair as onHideApp below). Fall back
+                // to a plain workspace switch only if the window can't take
+                // focus (e.g. minimized), so behaviour is never worse than before.
+                if !target.focusWindow() {
+                    _ = targetWorkspace.focusWorkspace()
+                }
+                target.nativeFocus()
             }
         } catch {
             // Same swallow-and-carry-on behavior as the previous `try?`, but
