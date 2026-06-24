@@ -44,7 +44,7 @@ struct SettingsView: View {
                     case .homepage:    HomepageSection(store: store)
                     case .keybindings: KeybindingsSection(store: store)
                     case .gaps:        GapsSection(store: store)
-                    case .catchAll:    CatchAllSection(store: store)
+                    case .workspaces:  WorkspacesSection(store: store)
                     case .tweaks:      TweaksSection()
                     case .diagnostics: DiagnosticsSection()
                     case .about:       AboutSection(store: store)
@@ -62,7 +62,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case homepage
     case keybindings
     case gaps
-    case catchAll
+    case workspaces
     case tweaks
     case diagnostics
     case about
@@ -75,7 +75,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
             case .homepage:    return "Homepage"
             case .keybindings: return "Keybindings"
             case .gaps:        return "Gaps"
-            case .catchAll:    return "Catch-all"
+            case .workspaces:  return "Workspaces"
             case .tweaks:      return "Tweaks"
             case .diagnostics: return "Diagnostics"
             case .about:       return "About"
@@ -88,7 +88,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
             case .homepage:    return "house"
             case .keybindings: return "keyboard"
             case .gaps:        return "ruler"
-            case .catchAll:    return "tray.2"
+            case .workspaces:  return "rectangle.split.3x1"
             case .tweaks:      return "gearshape.2"
             case .diagnostics: return "stethoscope"
             case .about:       return "info.circle"

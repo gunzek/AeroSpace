@@ -11,6 +11,9 @@ struct UIState: Codable, Equatable {
     /// non-nil means UI is managing the `[gaps]` section.
     var gaps: GapsSettings? = nil
     var catchAll: CatchAllSettings = .default
+    /// Per-workspace window limits + overflow ordering. Replaces the old
+    /// catch-all heuristic; `catchAll` above stays only for decode compat.
+    var workspaceLimits: WorkspaceLimitsSettings = .default
     /// `nil` = "leave [mode.main.binding] to whatever the user has";
     /// non-nil = UI manages the keybinding table.
     var keybindings: [KeybindingRule]? = nil
@@ -35,6 +38,7 @@ struct UIState: Codable, Equatable {
         homepage: HomepageSettings = .default,
         gaps: GapsSettings? = nil,
         catchAll: CatchAllSettings = .default,
+        workspaceLimits: WorkspaceLimitsSettings = .default,
         keybindings: [KeybindingRule]? = nil,
         followFocusOnRoute: Bool = true,
         followAppOnDockClick: Bool = true,
@@ -44,6 +48,7 @@ struct UIState: Codable, Equatable {
         self.homepage = homepage
         self.gaps = gaps
         self.catchAll = catchAll
+        self.workspaceLimits = workspaceLimits
         self.keybindings = keybindings
         self.followFocusOnRoute = followFocusOnRoute
         self.followAppOnDockClick = followAppOnDockClick
@@ -56,13 +61,14 @@ struct UIState: Codable, Equatable {
         homepage = try c.decodeIfPresent(HomepageSettings.self, forKey: .homepage) ?? .default
         gaps = try c.decodeIfPresent(GapsSettings.self, forKey: .gaps)
         catchAll = try c.decodeIfPresent(CatchAllSettings.self, forKey: .catchAll) ?? .default
+        workspaceLimits = try c.decodeIfPresent(WorkspaceLimitsSettings.self, forKey: .workspaceLimits) ?? .default
         keybindings = try c.decodeIfPresent([KeybindingRule].self, forKey: .keybindings)
         followFocusOnRoute = try c.decodeIfPresent(Bool.self, forKey: .followFocusOnRoute) ?? true
         followAppOnDockClick = try c.decodeIfPresent(Bool.self, forKey: .followAppOnDockClick) ?? true
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, appRouting, homepage, gaps, catchAll, keybindings,
+        case version, appRouting, homepage, gaps, catchAll, workspaceLimits, keybindings,
              followFocusOnRoute, followAppOnDockClick
     }
 }
@@ -246,6 +252,22 @@ struct CatchAllSettings: Codable, Equatable {
     var catchAllWorkspaces: [String] = []
 
     static let `default` = CatchAllSettings()
+}
+
+/// One managed workspace with an optional window-count cap. The order of
+/// `WorkspaceLimitsSettings.workspaces` is the overflow priority — when a
+/// workspace is over its limit, a new/excess window is bumped to the first
+/// workspace in that list with free space.
+struct ManagedWorkspace: Codable, Equatable {
+    var name: String          // UPPERCASED kanonická forma
+    var limit: Int? = nil     // nil nebo <=0 = neomezeno
+}
+
+struct WorkspaceLimitsSettings: Codable, Equatable {
+    var enabled: Bool = false
+    var workspaces: [ManagedWorkspace] = []   // POŘADÍ = priorita overflow
+
+    static let `default` = WorkspaceLimitsSettings()
 }
 
 struct GapsSettings: Codable, Equatable {

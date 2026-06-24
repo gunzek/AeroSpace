@@ -77,6 +77,9 @@ struct WorkspacePicker: View {
         for catchAllWorkspace in state.catchAll.catchAllWorkspaces {
             names.insert(catchAllWorkspace.uppercased())
         }
+        for managed in state.workspaceLimits.workspaces {
+            names.insert(managed.name.uppercased())
+        }
         // Show the current value too, so a name that came from raw TOML or an
         // old sidecar is visibly part of the menu.
         names.insert(workspace.uppercased())

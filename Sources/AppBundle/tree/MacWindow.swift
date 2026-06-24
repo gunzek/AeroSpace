@@ -276,8 +276,8 @@ private func onWindowDetected(_ window: Window) async throws {
             return
         }
     }
-    HomepageReservation.applyIfNeeded(window) // Phase 3.5: reserved-workspace bump
-    await applySlotPlacement(window)           // Phase 3.6: slot positioning
+    await applySlotPlacement(window)           // Phase 3.6: routing + slot positioning (seats the window first)
+    HomepageReservation.applyIfNeeded(window)  // Capacity: now that routing placed the window, evict the overflow
 }
 
 extension WindowDetectedCallback {

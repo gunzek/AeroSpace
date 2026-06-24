@@ -189,6 +189,9 @@ func reapplyRoutingAndSlotsToAllWindows() async {
         applySlotPlacement(window, title: rawTitle)
     }
     DiagnosticsLog.shared.log(.routing, "reapplied routing to \(processed) windows")
+    // Capacity: after every window is re-routed/re-slotted, evict the overflow
+    // from any over-limit workspace (apply-routing + launch-homepage both land here).
+    HomepageReservation.enforceAllOnReset()
 }
 
 /// Diagnostics (phase 8): one `.routing` line per actual window move, e.g.
